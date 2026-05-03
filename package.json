@@ -1,0 +1,24 @@
+{
+  "name": "ingresos-y-egresos-hogar",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2",
+    "vite": "^8.0.10"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.2.4",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.1.0",
+    "firebase": "^12.12.1",
+    "lucide-react": "^1.14.0",
+    "react-router-dom": "^7.14.2",
+    "tailwindcss": "^4.2.4"
+  }
+}

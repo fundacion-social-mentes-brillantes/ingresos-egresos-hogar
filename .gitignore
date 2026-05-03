@@ -1,0 +1,47 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
+
+# Dependency directories
+node_modules/
+**/node_modules/
+
+# Build outputs
+dist/
+lib/
+build/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Environment variables & Sensitive files
+.env
+.env.*
+*.local
+serviceAccountKey.json
+service-account.json
+credentials.json
+firebase-credentials.json
+*.p12
+*.pem
+secrets.js
+secrets.ts
+
+# Firebase
+.firebase/
+.firebaserc
+firebase-export-*
+
+# Vite / React
+*.tsbuildinfo
