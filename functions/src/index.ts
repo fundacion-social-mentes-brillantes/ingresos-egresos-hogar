@@ -34,11 +34,23 @@ interface BotAction {
   query?: {
     range: 'today' | 'last_3_days' | 'last_7_days' | 'this_month' | 'custom';
     metric: 'expenses' | 'income' | 'balance' | 'by_category' | 'behavior_analysis';
+    category?: string;
   };
   needsConfirmation?: boolean;
   confidence: number;
   emotionalTone?: 'calm' | 'encouraging' | 'alert' | 'neutral';
   suggestedNextQuestion?: string;
+}
+
+interface FinancialSummary {
+  totalIncome: number;
+  totalExpenses: number;
+  balance: number;
+  byCategory: Record<string, number>;
+  topCategory: { name: string; amount: number } | null;
+  transactionCount: number;
+  range: string;
+  generatedAt: Date;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -69,6 +81,78 @@ function parseTransactionDate(value?: string): admin.firestore.Timestamp {
   return admin.firestore.Timestamp.now();
 }
 
+async function getSummaryForUser(uid: string, range: string, category?: string): Promise<FinancialSummary> {
+  const db = admin.firestore();
+  let startDate = startOfMonth(new Date());
+  let endDate = endOfMonth(new Date());
+
+  if (range === 'today') startDate = startOfDay(new Date());
+  if (range === 'last_3_days') startDate = subDays(startOfDay(new Date()), 2);
+  if (range === 'last_7_days') startDate = subDays(startOfDay(new Date()), 6);
+
+  let query: admin.firestore.Query = db.collection('users').doc(uid).collection('transactions')
+    .where('date', '>=', admin.firestore.Timestamp.fromDate(startDate))
+    .where('date', '<=', admin.firestore.Timestamp.fromDate(endDate));
+
+  if (category) {
+    query = query.where('category', '==', category);
+  }
+
+  const snap = await query.get();
+  const txs = snap.docs.map(d => d.data());
+  
+  const income = txs.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+  const expenses = txs.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
+  
+  const cats: Record<string, number> = {};
+  txs.filter(t => t.type === 'expense').forEach(t => {
+    cats[t.category] = (cats[t.category] || 0) + t.amount;
+  });
+
+  const sortedCats = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+  const topCategory = sortedCats.length > 0 ? { name: sortedCats[0][0], amount: sortedCats[0][1] } : null;
+
+  return {
+    totalIncome: income,
+    totalExpenses: expenses,
+    balance: income - expenses,
+    byCategory: cats,
+    topCategory,
+    transactionCount: txs.length,
+    range,
+    generatedAt: new Date()
+  };
+}
+
+async function ensureDefaultAccounts(uid: string): Promise<any[]> {
+  const db = admin.firestore();
+  const accsCol = db.collection('users').doc(uid).collection('accounts');
+  const existingAccs = await accsCol.get();
+  
+  if (!existingAccs.empty) {
+    return existingAccs.docs.map(d => ({ id: d.id, ...d.data() }));
+  }
+
+  const defaults = [
+    { name: 'Efectivo', type: 'cash', initialBalance: 0, currentBalance: 0, active: true },
+    { name: 'Nequi', type: 'nequi', initialBalance: 0, currentBalance: 0, active: true },
+    { name: 'Daviplata', type: 'daviplata', initialBalance: 0, currentBalance: 0, active: true },
+    { name: 'Banco', type: 'bank', initialBalance: 0, currentBalance: 0, active: true }
+  ];
+
+  const batch = db.batch();
+  const created: any[] = [];
+  defaults.forEach(acc => {
+    const ref = accsCol.doc();
+    const data = { ...acc, createdAt: admin.firestore.FieldValue.serverTimestamp() };
+    batch.set(ref, data);
+    created.push({ id: ref.id, ...data });
+  });
+
+  await batch.commit();
+  return created;
+}
+
 // ── Bot Logic ──────────────────────────────────────────────────────────────
 
 async function callDeepSeek(userMessage: string, context: string, chatHistory: any[], apiKey: string): Promise<BotAction> {
@@ -80,7 +164,7 @@ PERSONALIDAD Y TONO:
 - Hablas en español colombiano natural (ej: "Listo", "Dale", "¿Cómo vas?", "Te entiendo").
 - Eres cercano, tranquilo, empático y útil. No eres un contador rígido.
 - Si el usuario está preocupado o estresado por el dinero, acompáñalo con calma.
-- Si el usuario habla de temas cotidianos o no financieros, responde de forma natural y humana; no rechaces la conversación, solo intégrala con tu rol de asistente.
+- Si el usuario habla de temas cotidianos o no financieros, responde de forma natural y humana.
 
 REGLAS DE OPERACIÓN:
 - Responde SIEMPRE en formato JSON estricto.
@@ -88,14 +172,15 @@ REGLAS DE OPERACIÓN:
 - "replyToUser" es tu respuesta humana.
 - "shouldCreateTransaction" es true solo si tienes: Tipo (gasto/ingreso), Monto y Descripción clara.
 - Si falta información para un registro, usa "intent": "clarify" y pregunta amablemente.
+- Para query_summary, analyze_behavior y financial_advice, NO inventes números. Devuelve el JSON con el intent correcto y el sistema se encargará de poner los datos reales.
 - Fecha: Si detectas una fecha (hoy, ayer, lunes pasado, 15 de marzo), devuélvela en "transaction.date" como YYYY-MM-DD. Si es hoy, usa "today".
-- Cuentas comunes: Efectivo, Nequi, Daviplata, Banco. (Default: Efectivo).
 - Categorías: Alimentación, Transporte, Hogar, Salud, Educación, Entretenimiento, Ropa, Tecnología, Ahorro, Ingreso, Otros.
 
-IMPORTANTE:
-- No inventes números que no estén en el contexto. 
-- Si el usuario pregunta "¿cuánto gasté?", usa "intent": "query_summary" para que el sistema calcule los datos reales.
-- Sé breve pero cálido.
+QUERY_SUMMARY:
+- Si el usuario pregunta por gastos de una categoría específica, incluye "category" en el objeto "query".
+
+EDICIÓN Y BORRADO:
+- Si el usuario pide editar o borrar (update_transaction, delete_transaction), responde con "clarify" diciendo que por ahora no puedes hacerlo automáticamente y que debe hacerlo manualmente en la lista de transacciones.
 
 CONTEXTO FINANCIERO ACTUAL:
 ${context}
@@ -154,230 +239,207 @@ export const chatWithBot = onCall({ secrets: [DEEPSEEK_API_KEY] }, async (reques
   const db = admin.firestore();
   const chatCol = db.collection('users').doc(uid).collection('chatMessages');
 
-  // 1. Guardar mensaje del usuario inmediatamente
-  await chatCol.add({
-    text: message,
-    sender: 'user',
-    createdAt: admin.firestore.FieldValue.serverTimestamp()
-  });
-
-  // 2. Obtener contexto (Cuentas, Transacciones recientes, Historial de chat)
-  const [accountsSnap, recentTxsSnap, chatHistorySnap] = await Promise.all([
-    db.collection('users').doc(uid).collection('accounts').get(),
-    db.collection('users').doc(uid).collection('transactions').orderBy('date', 'desc').limit(10).get(),
-    chatCol.orderBy('createdAt', 'desc').limit(12).get()
-  ]);
-
-  const accounts = accountsSnap.docs.map(d => ({ id: d.id, ...d.data() as any }));
-  const recentTxs = recentTxsSnap.docs.map(d => ({
-    desc: d.data().description,
-    amt: d.data().amount,
-    type: d.data().type,
-    cat: d.data().category,
-    date: d.data().date.toDate().toISOString()
-  }));
-  
-  const chatHistory = chatHistorySnap.docs.reverse().map(d => d.data());
-
-  // 3. Resumen del mes actual para contexto IA
-  const now = new Date();
-  const start = startOfMonth(now);
-  const end = endOfMonth(now);
-  const monthlyTxsSnap = await db.collection('users').doc(uid).collection('transactions')
-    .where('date', '>=', admin.firestore.Timestamp.fromDate(start))
-    .where('date', '<=', admin.firestore.Timestamp.fromDate(end))
-    .get();
-  
-  const monthlyData = monthlyTxsSnap.docs.map(d => d.data());
-  const totalIncome = monthlyData.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
-  const totalExpenses = monthlyData.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
-  
-  const context = `
-  Cuentas disponibles: ${accounts.map(a => `${a.name} ($${a.currentBalance})`).join(', ')}
-  Movimientos recientes: ${JSON.stringify(recentTxs)}
-  Resumen mes actual: Ingresos $${totalIncome}, Gastos $${totalExpenses}, Balance $${totalIncome - totalExpenses}
-  `;
-
-  // 4. Llamar a DeepSeek
-  const botAction = await callDeepSeek(message, context, chatHistory, DEEPSEEK_API_KEY.value());
-
-  // 5. Ejecutar acciones basadas en la intención
-  let transactionCreated = null;
-  let summaryData = null;
-
-  // Acción: Crear transacción
-  if (botAction.intent === 'create_transaction' && botAction.shouldCreateTransaction && botAction.transaction && botAction.confidence >= 0.75) {
-    const tx = botAction.transaction;
-    
-    // Buscar cuenta (Case insensitive)
-    let account = accounts.find(a => a.name.toLowerCase() === tx.accountName?.toLowerCase());
-    if (!account) account = accounts.find(a => a.name === 'Efectivo');
-    if (!account && accounts.length > 0) account = accounts[0];
-
-    if (account) {
-      const batch = db.batch();
-      const txRef = db.collection('users').doc(uid).collection('transactions').doc();
-      const accRef = db.collection('users').doc(uid).collection('accounts').doc(account.id);
-
-      const amount = Number(tx.amount);
-      const isIncome = tx.type === 'income';
-
-      batch.set(txRef, {
-        ...tx,
-        amount,
-        accountId: account.id,
-        accountName: account.name,
-        currency: 'COP',
-        source: 'bot',
-        confidence: botAction.confidence,
-        date: parseTransactionDate(tx.date),
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        rawText: message
-      });
-
-      // Actualizar saldo de cuenta
-      const balanceChange = isIncome ? amount : -amount;
-      batch.update(accRef, {
-        currentBalance: admin.firestore.FieldValue.increment(balanceChange),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-
-      await batch.commit();
-      
-      const newDoc = await txRef.get();
-      transactionCreated = { id: newDoc.id, ...newDoc.data() };
-    }
-  }
-
-  // Acción: Consultar resumen (Datos Reales)
-  if (botAction.intent === 'query_summary' && botAction.query) {
-    const qRange = botAction.query.range;
-    let sDate = startOfMonth(new Date());
-    let eDate = endOfMonth(new Date());
-
-    if (qRange === 'today') sDate = startOfDay(new Date());
-    if (qRange === 'last_3_days') sDate = subDays(startOfDay(new Date()), 2);
-    if (qRange === 'last_7_days') sDate = subDays(startOfDay(new Date()), 6);
-
-    const querySnap = await db.collection('users').doc(uid).collection('transactions')
-      .where('date', '>=', admin.firestore.Timestamp.fromDate(sDate))
-      .where('date', '<=', admin.firestore.Timestamp.fromDate(eDate))
-      .get();
-
-    const txs = querySnap.docs.map(d => d.data());
-    const inc = txs.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
-    const exp = txs.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
-    
-    const cats: Record<string, number> = {};
-    txs.filter(t => t.type === 'expense').forEach(t => {
-      cats[t.category] = (cats[t.category] || 0) + t.amount;
+  try {
+    // 1. Guardar mensaje del usuario inmediatamente
+    await chatCol.add({
+      text: message,
+      sender: 'user',
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    summaryData = {
-      totalIncome: inc,
-      totalExpenses: exp,
-      balance: inc - exp,
-      byCategory: cats,
-      range: qRange,
-      generatedAt: new Date()
+    // 2. Obtener contexto (Cuentas, Transacciones recientes, Historial de chat)
+    // EXCLUIMOS el mensaje actual del historial para no duplicarlo en la llamada a la IA
+    const [accountsSnap, recentTxsSnap, chatHistorySnap] = await Promise.all([
+      db.collection('users').doc(uid).collection('accounts').get(),
+      db.collection('users').doc(uid).collection('transactions').orderBy('date', 'desc').limit(10).get(),
+      chatCol.orderBy('createdAt', 'desc').limit(13).get() // Pedimos 13 para descartar el último (el actual)
+    ]);
+
+    let accounts = accountsSnap.docs.map(d => ({ id: d.id, ...d.data() as any }));
+    const recentTxs = recentTxsSnap.docs.map(d => ({
+      desc: d.data().description,
+      amt: d.data().amount,
+      type: d.data().type,
+      cat: d.data().category,
+      date: d.data().date.toDate().toISOString()
+    }));
+    
+    // Filtrar el mensaje actual (el más reciente) para evitar duplicación en callDeepSeek
+    const allHistory = chatHistorySnap.docs.reverse();
+    const chatHistory = allHistory.length > 0 ? allHistory.slice(0, -1).map(d => d.data()) : [];
+
+    // 3. Resumen del mes actual para contexto IA
+    const monthlySummary = await getSummaryForUser(uid, 'this_month');
+    
+    const context = `
+    Cuentas: ${accounts.map(a => `${a.name} ($${a.currentBalance})`).join(', ')}
+    Movimientos recientes: ${JSON.stringify(recentTxs)}
+    Resumen mes: Ingresos $${monthlySummary.totalIncome}, Gastos $${monthlySummary.totalExpenses}, Balance $${monthlySummary.balance}
+    `;
+
+    // 4. Llamar a DeepSeek
+    const botAction = await callDeepSeek(message, context, chatHistory, DEEPSEEK_API_KEY.value());
+
+    // 5. Ejecutar acciones basadas en la intención
+    let transactionCreated = null;
+    let summaryData: any = null;
+
+    // Asegurar que existan cuentas si se va a crear transacción
+    if (botAction.intent === 'create_transaction' && accounts.length === 0) {
+      accounts = await ensureDefaultAccounts(uid);
+    }
+
+    // Acción: Crear transacción
+    if (botAction.intent === 'create_transaction' && botAction.shouldCreateTransaction && botAction.transaction && botAction.confidence >= 0.75) {
+      const tx = botAction.transaction;
+      let account = accounts.find(a => a.name.toLowerCase() === tx.accountName?.toLowerCase());
+      if (!account) account = accounts.find(a => a.name === 'Efectivo') || accounts[0];
+
+      if (account) {
+        const batch = db.batch();
+        const txRef = db.collection('users').doc(uid).collection('transactions').doc();
+        const accRef = db.collection('users').doc(uid).collection('accounts').doc(account.id);
+        const amount = Number(tx.amount);
+
+        batch.set(txRef, {
+          ...tx,
+          amount,
+          accountId: account.id,
+          accountName: account.name,
+          currency: 'COP',
+          source: 'bot',
+          confidence: botAction.confidence,
+          date: parseTransactionDate(tx.date),
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          rawText: message
+        });
+
+        const balanceChange = tx.type === 'income' ? amount : -amount;
+        batch.update(accRef, {
+          currentBalance: admin.firestore.FieldValue.increment(balanceChange),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        await batch.commit();
+        const newDoc = await txRef.get();
+        transactionCreated = { id: newDoc.id, ...newDoc.data() };
+      } else {
+        botAction.replyToUser = "Lo siento, no pude encontrar una cuenta para registrar el movimiento. Por favor, crea una cuenta primero en la configuración.";
+        botAction.intent = 'clarify';
+      }
+    }
+
+    // Acción: Consultar resumen o por categoría
+    if (botAction.intent === 'query_summary' && botAction.query) {
+      const range = botAction.query.range || 'this_month';
+      const cat = botAction.query.category;
+      summaryData = await getSummaryForUser(uid, range, cat);
+
+      if (cat) {
+        const catSpent = summaryData.totalExpenses;
+        botAction.replyToUser = `En ${cat} llevas gastados $${catSpent.toLocaleString('es-CO')} en lo que va de ${range === 'this_month' ? 'el mes' : range}.`;
+        if (range === 'this_month') {
+          const generalSummary = await getSummaryForUser(uid, 'this_month');
+          botAction.replyToUser += ` Tus gastos totales del mes van en $${generalSummary.totalExpenses.toLocaleString('es-CO')}.`;
+        }
+      } else {
+        botAction.replyToUser = `Listo, revisé tus movimientos. En ${range === 'this_month' ? 'este mes' : range} llevas $${summaryData.totalExpenses.toLocaleString('es-CO')} en gastos y $${summaryData.totalIncome.toLocaleString('es-CO')} en ingresos. Tu balance neto es de $${summaryData.balance.toLocaleString('es-CO')}.`;
+        if (summaryData.topCategory) {
+          botAction.replyToUser += ` La categoría con más gastos es ${summaryData.topCategory.name} con $${summaryData.topCategory.amount.toLocaleString('es-CO')}.`;
+        }
+      }
+    }
+
+    // Acción: Analizar comportamiento
+    if (botAction.intent === 'analyze_behavior') {
+      summaryData = await getSummaryForUser(uid, 'this_month');
+      
+      if (summaryData.transactionCount === 0) {
+        botAction.replyToUser = "Todavía no tengo suficientes datos para analizar tu comportamiento. ¡Empieza a registrar tus gastos e ingresos y te ayudaré!";
+      } else {
+        const isOverspending = summaryData.totalExpenses > summaryData.totalIncome;
+        botAction.replyToUser = `He analizado tus movimientos de este mes. Llevas un gasto promedio de $${Math.round(summaryData.totalExpenses / 30).toLocaleString('es-CO')} al día. `;
+        
+        if (summaryData.topCategory) {
+          botAction.replyToUser += `Veo que tu mayor gasto es en ${summaryData.topCategory.name}. `;
+        }
+        
+        if (isOverspending) {
+          botAction.replyToUser += "Tus gastos están superando tus ingresos este mes, tratemos de buscar dónde podemos recortar un poco para estar más tranquilos.";
+        } else {
+          botAction.replyToUser += "Vas por buen camino con un balance positivo. ¡Sigue así!";
+        }
+      }
+    }
+
+    // Acción: Consejo financiero
+    if (botAction.intent === 'financial_advice') {
+      summaryData = await getSummaryForUser(uid, 'this_month');
+      if (summaryData.totalExpenses === 0) {
+        botAction.replyToUser = "Mi consejo hoy es que empieces registrando hasta el gasto más pequeño. Así sabremos exactamente por dónde se va el dinero.";
+      } else {
+        botAction.replyToUser = "Basado en tus datos, te sugiero: ";
+        if (summaryData.topCategory) {
+          botAction.replyToUser += `1. Intenta reducir un 10% tus gastos en ${summaryData.topCategory.name} la próxima semana. `;
+        }
+        botAction.replyToUser += "2. Antes de un gasto grande, pregúntate si es una necesidad o un gusto. 3. Revisa tus suscripciones que tal vez no usas tanto.";
+      }
+    }
+
+    // Manejar update/delete con clarify
+    if (botAction.intent === 'update_transaction' || botAction.intent === 'delete_transaction') {
+      botAction.replyToUser = "Por ahora no puedo editar o borrar movimientos directamente desde el chat. Porfa, ve a la pestaña de 'Movimientos' y hazlo manualmente desde ahí.";
+      botAction.intent = 'clarify';
+    }
+
+    // 6. Guardar respuesta del bot en el chat
+    const botMsg: any = {
+      text: botAction.replyToUser,
+      sender: 'bot',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      intent: botAction.intent,
+      emotionalTone: botAction.emotionalTone || 'neutral',
+      suggestedNextQuestion: botAction.suggestedNextQuestion || ''
     };
 
-    // Ajustar respuesta humana con datos reales si es necesario
-    if (botAction.replyToUser.includes('[DATOS]')) {
-      botAction.replyToUser = botAction.replyToUser.replace('[DATOS]', 
-        `llevas $${exp.toLocaleString('es-CO')} en gastos y $${inc.toLocaleString('es-CO')} en ingresos. El balance es de $${(inc-exp).toLocaleString('es-CO')}.`
-      );
-    }
+    if (transactionCreated) botMsg.transactionId = (transactionCreated as any).id;
+    if (summaryData) botMsg.summary = summaryData;
+
+    await chatCol.add(botMsg);
+
+    return {
+      replyToUser: botAction.replyToUser,
+      intent: botAction.intent,
+      emotionalTone: botAction.emotionalTone,
+      suggestedNextQuestion: botAction.suggestedNextQuestion,
+      transactionCreated,
+      summary: summaryData
+    };
+
+  } catch (error: any) {
+    console.error('Chat Error:', error);
+    
+    // Guardar mensaje de error en el chat para el usuario
+    await chatCol.add({
+      text: "Tuve un problema técnico al procesar eso. ¿Me lo puedes repetir de forma más sencilla?",
+      sender: 'bot',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      intent: 'clarify'
+    });
+
+    throw new HttpsError('internal', error.message || 'Error interno del servidor.');
   }
-
-  // 6. Guardar respuesta del bot en el chat
-  const botMsg: any = {
-    text: botAction.replyToUser,
-    sender: 'bot',
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    intent: botAction.intent,
-    emotionalTone: botAction.emotionalTone || 'neutral',
-    suggestedNextQuestion: botAction.suggestedNextQuestion || ''
-  };
-
-  if (transactionCreated) botMsg.transactionId = (transactionCreated as any).id;
-  if (summaryData) botMsg.summary = summaryData;
-
-  await chatCol.add(botMsg);
-
-  return {
-    replyToUser: botAction.replyToUser,
-    intent: botAction.intent,
-    emotionalTone: botAction.emotionalTone,
-    suggestedNextQuestion: botAction.suggestedNextQuestion,
-    transactionCreated,
-    summary: summaryData
-  };
 });
 
 export const getFinancialSummary = onCall(async (request) => {
   if (!request.auth) throw new HttpsError('unauthenticated', 'Autenticación requerida.');
-  
-  const uid = request.auth.uid;
-  const { range } = request.data;
-  const db = admin.firestore();
-  
-  let startDate = startOfMonth(new Date());
-  let endDate = endOfMonth(new Date());
-
-  if (range === 'last_3_days') startDate = subDays(startOfDay(new Date()), 2);
-  if (range === 'last_7_days') startDate = subDays(startOfDay(new Date()), 6);
-  if (range === 'today') startDate = startOfDay(new Date());
-
-  const txsSnap = await db.collection('users').doc(uid).collection('transactions')
-    .where('date', '>=', admin.firestore.Timestamp.fromDate(startDate))
-    .where('date', '<=', admin.firestore.Timestamp.fromDate(endDate))
-    .get();
-
-  const transactions = txsSnap.docs.map(d => d.data());
-  const income = transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
-  const expenses = transactions.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
-  
-  const byCategory: Record<string, number> = {};
-  transactions.filter(t => t.type === 'expense').forEach(t => {
-    byCategory[t.category] = (byCategory[t.category] || 0) + t.amount;
-  });
-
-  return {
-    totalIncome: income,
-    totalExpenses: expenses,
-    balance: income - expenses,
-    byCategory,
-    range,
-    generatedAt: new Date()
-  };
+  const { range, category } = request.data;
+  return await getSummaryForUser(request.auth.uid, range || 'this_month', category);
 });
 
 export const seedDefaultUserData = onCall(async (request) => {
   if (!request.auth) throw new HttpsError('unauthenticated', 'Autenticación requerida.');
-  
-  const uid = request.auth.uid;
-  const db = admin.firestore();
-  
-  const accsCol = db.collection('users').doc(uid).collection('accounts');
-  const existingAccs = await accsCol.limit(1).get();
-  
-  if (!existingAccs.empty) return { success: false, message: 'Ya inicializado.' };
-
-  const defaults = [
-    { name: 'Efectivo', type: 'cash', initialBalance: 0, currentBalance: 0, active: true },
-    { name: 'Nequi', type: 'nequi', initialBalance: 0, currentBalance: 0, active: true },
-    { name: 'Daviplata', type: 'daviplata', initialBalance: 0, currentBalance: 0, active: true },
-    { name: 'Banco', type: 'bank', initialBalance: 0, currentBalance: 0, active: true }
-  ];
-
-  const batch = db.batch();
-  defaults.forEach(acc => {
-    const ref = accsCol.doc();
-    batch.set(ref, { ...acc, createdAt: admin.firestore.FieldValue.serverTimestamp() });
-  });
-
-  await batch.commit();
+  await ensureDefaultAccounts(request.auth.uid);
   return { success: true };
 });

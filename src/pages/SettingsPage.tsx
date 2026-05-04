@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTransactions } from '../hooks/useTransactions';
-import { updateAccount, addAccount, updateSettings } from '../lib/firestore';
+import { addAccount } from '../lib/firestore';
 import { CATEGORIES, ACCOUNT_LABELS, type AccountType, formatCOP } from '../types';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -10,13 +10,9 @@ import {
   User,
   Wallet, 
   Tag, 
-  Settings as SettingsIcon,
   Plus,
-  Check,
-  Loader2,
   DollarSign
 } from 'lucide-react';
-import clsx from 'clsx';
 
 export function SettingsPage() {
   const { user } = useAuth();

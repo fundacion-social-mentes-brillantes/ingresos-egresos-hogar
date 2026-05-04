@@ -6,11 +6,9 @@ import {
   query,
   orderBy,
   limit,
-  addDoc,
-  onSnapshot,
-  serverTimestamp
+  onSnapshot
 } from 'firebase/firestore';
-import type { ChatMessage, BotResponse } from '../types';
+import type { ChatMessage } from '../types';
 import { formatCOP } from '../types';
 import { Send, Bot, Loader2, RefreshCw, CheckCircle2, TrendingUp, TrendingDown, PieChart } from 'lucide-react';
 
