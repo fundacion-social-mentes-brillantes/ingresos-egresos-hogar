@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { getTransactions, getAccounts } from '../lib/firestore';
 import type { Transaction, Account, FinancialSummary } from '../types';
-import { startOfMonth, endOfMonth, subDays, startOfDay, endOfDay } from 'date-fns';
+import { startOfMonth, endOfMonth, subDays, startOfDay } from 'date-fns';
 
 export function useTransactions() {
   const { user } = useAuth();

@@ -1,20 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { db } from '../config/firebase';
+import { db, callChatWithBot } from '../lib/firebase';
 import {
   collection,
   query,
-  where,
   orderBy,
   limit,
   addDoc,
   onSnapshot,
-  Timestamp,
   serverTimestamp
 } from 'firebase/firestore';
-import { httpsCallable } from 'firebase/functions';
-import { functions } from '../config/firebase';
-import { ChatMessage, BotResponse } from '../types';
+import type { ChatMessage, BotResponse } from '../types';
 import { Send, Bot, User, Loader2, RefreshCw } from 'lucide-react';
 
 interface ChatPageProps {
@@ -71,8 +67,7 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
       });
 
       // 2. Call AI Function
-      const chatWithBot = httpsCallable<{ message: string }, BotResponse>(functions, 'chatWithBot');
-      const response = await chatWithBot({ message: messageText });
+      const response = await callChatWithBot({ message: messageText });
       const botData = response.data;
 
       // 3. Add Bot Message

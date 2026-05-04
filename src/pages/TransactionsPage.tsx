@@ -133,9 +133,13 @@ export function TransactionsPage() {
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-2">
                         {t.source === 'bot' ? (
-                          <Bot className="w-3.5 h-3.5 text-blue-400 shrink-0" title="Creado por bot" />
+                          <span title="Creado por bot">
+                            <Bot className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                          </span>
                         ) : (
-                          <User className="w-3.5 h-3.5 text-slate-500 shrink-0" title="Manual" />
+                          <span title="Manual">
+                            <User className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                          </span>
                         )}
                         <span className="text-sm text-slate-200 font-medium truncate max-w-[150px] md:max-w-xs">{t.description}</span>
                       </div>

@@ -50,10 +50,11 @@ export interface Transaction {
 
 export interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant';
-  content: string;
+  text: string;
+  sender: 'user' | 'bot';
   createdAt: Date;
-  parsedAction?: BotAction;
+  suggestedNextQuestion?: string;
+  emotionalTone?: string;
   loading?: boolean;
 }
 
@@ -93,12 +94,13 @@ export interface BotAction {
 
 // ── Firebase callable response ─────────────────────────────────────────────
 
-export interface ChatBotResponse {
+export interface BotResponse {
   replyToUser: string;
   intent: BotIntent;
   transactionCreated?: Transaction;
   summary?: FinancialSummary;
   suggestedNextQuestion?: string;
+  emotionalTone?: string;
 }
 
 export interface FinancialSummary {

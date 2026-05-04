@@ -7,9 +7,8 @@ import {
   updateProfile,
   type User,
 } from 'firebase/auth';
-import { auth } from '../lib/firebase';
-import { callSeedDefaultUserData, callChatWithBot as _unused } from '../lib/firebase';
-import { createUserProfile, getUserProfile } from '../lib/firestore';
+import { auth, callSeedDefaultUserData } from '../lib/firebase';
+import { createUserProfile } from '../lib/firestore';
 
 interface AuthContextType {
   user: User | null;
@@ -70,6 +69,3 @@ export function useAuth() {
   if (!ctx) throw new Error('useAuth must be used inside AuthProvider');
   return ctx;
 }
-
-// Silence unused import warning
-void _unused;
