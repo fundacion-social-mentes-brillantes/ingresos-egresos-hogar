@@ -81,6 +81,15 @@ function parseTransactionDate(value?: string): admin.firestore.Timestamp {
   return admin.firestore.Timestamp.now();
 }
 
+function normalizeCategory(cat: string): string {
+  if (!cat) return '';
+  return cat
+    .toLowerCase()
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, ""); // Remove accents/tildes
+}
+
 async function getSummaryForUser(uid: string, range: string, category?: string): Promise<FinancialSummary> {
   const db = admin.firestore();
   let startDate = startOfMonth(new Date());
@@ -90,16 +99,17 @@ async function getSummaryForUser(uid: string, range: string, category?: string):
   if (range === 'last_3_days') startDate = subDays(startOfDay(new Date()), 2);
   if (range === 'last_7_days') startDate = subDays(startOfDay(new Date()), 6);
 
-  let query: admin.firestore.Query = db.collection('users').doc(uid).collection('transactions')
+  const query = db.collection('users').doc(uid).collection('transactions')
     .where('date', '>=', admin.firestore.Timestamp.fromDate(startDate))
     .where('date', '<=', admin.firestore.Timestamp.fromDate(endDate));
 
-  if (category) {
-    query = query.where('category', '==', category);
-  }
-
   const snap = await query.get();
-  const txs = snap.docs.map(d => d.data());
+  let txs = snap.docs.map(d => d.data());
+
+  if (category) {
+    const normTarget = normalizeCategory(category);
+    txs = txs.filter(t => t.category && normalizeCategory(t.category) === normTarget);
+  }
   
   const income = txs.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
   const expenses = txs.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
@@ -292,41 +302,48 @@ export const chatWithBot = onCall({ secrets: [DEEPSEEK_API_KEY] }, async (reques
     // Acción: Crear transacción
     if (botAction.intent === 'create_transaction' && botAction.shouldCreateTransaction && botAction.transaction && botAction.confidence >= 0.75) {
       const tx = botAction.transaction;
-      let account = accounts.find(a => a.name.toLowerCase() === tx.accountName?.toLowerCase());
-      if (!account) account = accounts.find(a => a.name === 'Efectivo') || accounts[0];
+      const amount = Number(tx.amount);
 
-      if (account) {
-        const batch = db.batch();
-        const txRef = db.collection('users').doc(uid).collection('transactions').doc();
-        const accRef = db.collection('users').doc(uid).collection('accounts').doc(account.id);
-        const amount = Number(tx.amount);
-
-        batch.set(txRef, {
-          ...tx,
-          amount,
-          accountId: account.id,
-          accountName: account.name,
-          currency: 'COP',
-          source: 'bot',
-          confidence: botAction.confidence,
-          date: parseTransactionDate(tx.date),
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          rawText: message
-        });
-
-        const balanceChange = tx.type === 'income' ? amount : -amount;
-        batch.update(accRef, {
-          currentBalance: admin.firestore.FieldValue.increment(balanceChange),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-
-        await batch.commit();
-        const newDoc = await txRef.get();
-        transactionCreated = { id: newDoc.id, ...newDoc.data() };
-      } else {
-        botAction.replyToUser = "Lo siento, no pude encontrar una cuenta para registrar el movimiento. Por favor, crea una cuenta primero en la configuración.";
+      if (isNaN(amount) || !isFinite(amount) || amount <= 0) {
+        botAction.replyToUser = "No alcancé a identificar bien el valor. ¿Me dices cuánto fue?";
         botAction.intent = 'clarify';
+        botAction.shouldCreateTransaction = false;
+      } else {
+        let account = accounts.find(a => a.name.toLowerCase() === tx.accountName?.toLowerCase());
+        if (!account) account = accounts.find(a => a.name === 'Efectivo') || accounts[0];
+
+        if (account) {
+          const batch = db.batch();
+          const txRef = db.collection('users').doc(uid).collection('transactions').doc();
+          const accRef = db.collection('users').doc(uid).collection('accounts').doc(account.id);
+
+          batch.set(txRef, {
+            ...tx,
+            amount,
+            accountId: account.id,
+            accountName: account.name,
+            currency: 'COP',
+            source: 'bot',
+            confidence: botAction.confidence,
+            date: parseTransactionDate(tx.date),
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            rawText: message
+          });
+
+          const balanceChange = tx.type === 'income' ? amount : -amount;
+          batch.update(accRef, {
+            currentBalance: admin.firestore.FieldValue.increment(balanceChange),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+
+          await batch.commit();
+          const newDoc = await txRef.get();
+          transactionCreated = { id: newDoc.id, ...newDoc.data() };
+        } else {
+          botAction.replyToUser = "Lo siento, no pude encontrar una cuenta para registrar el movimiento. Por favor, crea una cuenta primero en la configuración.";
+          botAction.intent = 'clarify';
+        }
       }
     }
 
