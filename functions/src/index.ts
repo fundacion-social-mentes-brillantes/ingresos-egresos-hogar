@@ -1,9 +1,9 @@
-import * as functions from 'firebase-functions/v2';
+
 import * as admin from 'firebase-admin';
 import { defineSecret } from 'firebase-functions/params';
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import axios from 'axios';
-import { startOfMonth, endOfMonth, subDays, startOfDay, endOfDay } from 'date-fns';
+import { startOfMonth, endOfMonth, subDays, startOfDay } from 'date-fns';
 
 admin.initializeApp();
 
