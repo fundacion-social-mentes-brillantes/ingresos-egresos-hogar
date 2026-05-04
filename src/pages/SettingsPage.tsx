@@ -2,12 +2,12 @@ import { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTransactions } from '../hooks/useTransactions';
 import { updateAccount, addAccount, updateSettings } from '../lib/firestore';
-import { CATEGORIES, ACCOUNT_LABELS, type AccountType } from '../types';
+import { CATEGORIES, ACCOUNT_LABELS, type AccountType, formatCOP } from '../types';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Input, Select } from '../components/ui/Input';
 import { 
-  User, 
+  User,
   Wallet, 
   Tag, 
   Settings as SettingsIcon,
@@ -140,7 +140,7 @@ export function SettingsPage() {
               </div>
               <div className="text-right">
                 <p className="text-sm font-bold text-blue-400">ACTIVA</p>
-                <p className="text-xs text-slate-500 mt-0.5">Saldo: No disp.</p>
+                <p className="text-xs text-slate-500 mt-0.5">Saldo: {formatCOP(acc.currentBalance)}</p>
               </div>
             </Card>
           ))}

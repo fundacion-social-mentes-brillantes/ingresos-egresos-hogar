@@ -11,7 +11,8 @@ import {
   serverTimestamp
 } from 'firebase/firestore';
 import type { ChatMessage, BotResponse } from '../types';
-import { Send, Bot, User, Loader2, RefreshCw } from 'lucide-react';
+import { formatCOP } from '../types';
+import { Send, Bot, Loader2, RefreshCw, CheckCircle2, TrendingUp, TrendingDown, PieChart } from 'lucide-react';
 
 interface ChatPageProps {
   embedded?: boolean;
@@ -29,7 +30,7 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
     if (!user) return;
 
     const q = query(
-      collection(db, `users/${user.uid}/messages`),
+      collection(db, `users/${user.uid}/chatMessages`),
       orderBy('createdAt', 'desc'),
       limit(50)
     );
@@ -59,34 +60,12 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
     setIsTyping(true);
 
     try {
-      // 1. Add User Message
-      await addDoc(collection(db, `users/${user.uid}/messages`), {
-        text: messageText,
-        sender: 'user',
-        createdAt: serverTimestamp()
-      });
-
-      // 2. Call AI Function
-      const response = await callChatWithBot({ message: messageText });
-      const botData = response.data;
-
-      // 3. Add Bot Message
-      await addDoc(collection(db, `users/${user.uid}/messages`), {
-        text: botData.replyToUser,
-        sender: 'bot',
-        createdAt: serverTimestamp(),
-        suggestedNextQuestion: botData.suggestedNextQuestion,
-        emotionalTone: botData.emotionalTone
-      });
-
+      // Solo llamamos a la función de Firebase. 
+      // El backend se encarga de guardar el mensaje del usuario y la respuesta del bot.
+      await callChatWithBot({ message: messageText });
     } catch (error) {
       console.error('Chat error:', error);
-      // Fallback message
-      await addDoc(collection(db, `users/${user.uid}/messages`), {
-        text: "Lo siento, tuve un pequeño problema técnico. ¿Podrías repetirme eso?",
-        sender: 'bot',
-        createdAt: serverTimestamp()
-      });
+      // Opcionalmente podrías mostrar un toast o mensaje de error local.
     } finally {
       setLoading(false);
       setIsTyping(false);
@@ -144,6 +123,52 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
             >
               {msg.text}
             </div>
+
+            {/* Rich Widgets */}
+            {msg.sender === 'bot' && (
+              <div className="w-full max-w-[85%] mt-2 space-y-2">
+                {msg.transactionId && (
+                  <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-3 flex items-center gap-3 animate-in zoom-in-95 duration-500">
+                    <div className="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center shrink-0">
+                      <CheckCircle2 className="w-5 h-5 text-green-400" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-green-400 uppercase tracking-wider">Movimiento Registrado</p>
+                      <p className="text-[10px] text-slate-400">ID: {msg.transactionId.substring(0, 8)}...</p>
+                    </div>
+                  </div>
+                )}
+
+                {msg.summary && (
+                  <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4 space-y-3 animate-in slide-in-from-left-2 duration-500">
+                    <div className="flex items-center gap-2 border-b border-slate-700/50 pb-2">
+                      <PieChart className="w-4 h-4 text-blue-400" />
+                      <p className="text-xs font-bold text-slate-200 uppercase tracking-wider">Resumen de {msg.summary.range === 'this_month' ? 'el mes' : msg.summary.range}</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-1 text-[10px] text-green-400 font-bold uppercase">
+                          <TrendingUp className="w-3 h-3" /> Ingresos
+                        </div>
+                        <p className="text-sm font-bold text-slate-100">{formatCOP(msg.summary.totalIncome)}</p>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-1 text-[10px] text-red-400 font-bold uppercase">
+                          <TrendingDown className="w-3 h-3" /> Gastos
+                        </div>
+                        <p className="text-sm font-bold text-slate-100">{formatCOP(msg.summary.totalExpenses)}</p>
+                      </div>
+                    </div>
+                    <div className="pt-2 border-t border-slate-700/50 flex justify-between items-center">
+                      <span className="text-[10px] text-slate-500 font-bold uppercase">Balance Neto</span>
+                      <span className={`text-sm font-black ${msg.summary.balance >= 0 ? 'text-blue-400' : 'text-red-400'}`}>
+                        {formatCOP(msg.summary.balance)}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             
             {/* Suggested Chips (Only on the last bot message) */}
             {msg.sender === 'bot' && msg.suggestedNextQuestion && msg === messages[messages.length - 1] && (

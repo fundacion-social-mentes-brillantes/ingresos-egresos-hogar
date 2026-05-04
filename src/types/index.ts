@@ -3,15 +3,17 @@
 export type TransactionType = 'income' | 'expense';
 export type TransactionSource = 'bot' | 'manual';
 export type AccountType = 'cash' | 'nequi' | 'daviplata' | 'bank' | 'other';
-export type QueryRange = 'this_month' | 'last_3_days' | 'last_7_days' | 'custom';
-export type QueryMetric = 'expenses' | 'income' | 'balance' | 'by_category';
+export type QueryRange = 'today' | 'this_month' | 'last_3_days' | 'last_7_days' | 'custom';
+export type QueryMetric = 'expenses' | 'income' | 'balance' | 'by_category' | 'behavior_analysis';
 export type BotIntent =
   | 'create_transaction'
   | 'query_summary'
+  | 'analyze_behavior'
+  | 'financial_advice'
   | 'update_transaction'
   | 'delete_transaction'
   | 'clarify'
-  | 'general_help';
+  | 'conversation_only';
 
 export interface UserProfile {
   uid: string;
@@ -56,6 +58,8 @@ export interface ChatMessage {
   suggestedNextQuestion?: string;
   emotionalTone?: string;
   loading?: boolean;
+  transactionId?: string;
+  summary?: FinancialSummary;
 }
 
 export interface AppSettings {
@@ -69,6 +73,7 @@ export interface AppSettings {
 export interface BotTransactionPayload {
   type: TransactionType;
   amount: number;
+  currency: 'COP';
   category: string;
   accountName: string;
   description: string;
