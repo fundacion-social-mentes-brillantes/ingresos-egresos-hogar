@@ -8,7 +8,7 @@ import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
-import type { BotResponse, FinancialSummary, QueryRange } from '../types';
+import type { BotResponse, FinancialSummary, QueryRange, ChatWithBotRequest } from '../types';
 
 const firebaseConfig = {
   apiKey:            import.meta.env.VITE_FIREBASE_API_KEY,
@@ -28,7 +28,7 @@ export const functions = getFunctions(app, 'us-central1');
 // ── Callable functions ──────────────────────────────────────────────────────
 
 export const callChatWithBot = httpsCallable<
-  { message: string },
+  ChatWithBotRequest,
   BotResponse
 >(functions, 'chatWithBot');
 

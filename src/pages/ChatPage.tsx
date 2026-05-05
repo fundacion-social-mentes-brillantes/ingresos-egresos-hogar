@@ -10,7 +10,7 @@ import {
 } from 'firebase/firestore';
 import type { ChatMessage } from '../types';
 import { formatCOP } from '../types';
-import { Send, Bot, Loader2, RefreshCw, CheckCircle2, TrendingUp, TrendingDown, PieChart } from 'lucide-react';
+import { Send, Bot, Loader2, RefreshCw, CheckCircle2, TrendingUp, TrendingDown, PieChart, Image as ImageIcon, X, Camera } from 'lucide-react';
 
 interface ChatPageProps {
   embedded?: boolean;
@@ -22,6 +22,8 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  const [selectedImage, setSelectedImage] = useState<{ base64: string; mime: string; preview: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -49,21 +51,89 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
     }
   }, [messages, isTyping]);
 
+  const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      alert('Por favor selecciona una imagen válida.');
+      return;
+    }
+
+    // Limit original size to 8MB just in case
+    if (file.size > 8 * 1024 * 1024) {
+      alert('La imagen es demasiado grande. Intenta con una de menos de 8MB.');
+      return;
+    }
+
+    // Compress/Resize logic
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new window.Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+        const maxDim = 1280;
+
+        if (width > height) {
+          if (width > maxDim) {
+            height *= maxDim / width;
+            width = maxDim;
+          }
+        } else {
+          if (height > maxDim) {
+            width *= maxDim / height;
+            height = maxDim;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx?.drawImage(img, 0, 0, width, height);
+
+        const compressedBase64 = canvas.toDataURL('image/jpeg', 0.75);
+        setSelectedImage({
+          base64: compressedBase64.split(',')[1],
+          mime: 'image/jpeg',
+          preview: compressedBase64
+        });
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+    // Clear input so same file can be re-selected if removed
+    e.target.value = '';
+  };
+
   const handleSend = async (text: string = input) => {
     const messageText = text.trim();
-    if (!messageText || !user || loading) return;
+    if (!messageText && !selectedImage) return;
+    if (!user || loading) return;
 
+    const finalMessage = messageText || "Analiza esta imagen y dime si hay un gasto o ingreso para registrar.";
+    
     setInput('');
+    const imageData = selectedImage;
+    setSelectedImage(null);
     setLoading(true);
     setIsTyping(true);
 
     try {
-      // Solo llamamos a la función de Firebase. 
-      // El backend se encarga de guardar el mensaje del usuario y la respuesta del bot.
-      await callChatWithBot({ message: messageText });
-    } catch (error) {
+      await callChatWithBot({ 
+        message: finalMessage,
+        imageBase64: imageData?.base64,
+        imageMimeType: imageData?.mime
+      });
+    } catch (error: any) {
       console.error('Chat error:', error);
-      // Opcionalmente podrías mostrar un toast o mensaje de error local.
+      const code = error.code || '';
+      if (code === 'functions/invalid-argument') {
+        alert('Error en los datos enviados. Verifica el tamaño de la imagen.');
+      } else {
+        alert('Ocurrió un error al procesar tu mensaje.');
+      }
     } finally {
       setLoading(false);
       setIsTyping(false);
@@ -102,7 +172,7 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
             </div>
             <h3 className="text-slate-200 font-semibold">¡Hola! Soy tu asistente de Ingresos y Egresos</h3>
             <p className="text-slate-500 text-sm mt-2 max-w-xs">
-              Cuéntame qué has comprado hoy o pregúntame cómo van tus finanzas. ¡Estoy para ayudarte!
+              Cuéntame qué has comprado hoy, pregúntame cómo van tus finanzas o <b>envíame una foto de un recibo</b>.
             </p>
           </div>
         )}
@@ -194,24 +264,69 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
         )}
       </div>
 
-      {/* Input */}
+      {/* Image Preview Overlay */}
+      {selectedImage && (
+        <div className="px-4 py-2 border-t border-slate-700/50 bg-slate-800/50 flex items-center gap-3 animate-in slide-in-from-bottom-2">
+          <div className="relative group">
+            <img src={selectedImage.preview} alt="Preview" className="w-12 h-12 object-cover rounded-lg border border-slate-600" />
+            <button 
+              onClick={() => setSelectedImage(null)}
+              className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-0.5 shadow-lg hover:bg-red-400 transition-colors"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-hidden">
+            <p className="text-[10px] text-slate-400 font-bold uppercase truncate">Imagen preparada para analizar</p>
+            <p className="text-[9px] text-slate-500">Formato: {selectedImage.mime}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Input Form */}
       <div className="p-4 border-t border-slate-700/50 bg-slate-800/30">
         <form 
           onSubmit={(e) => { e.preventDefault(); handleSend(); }}
-          className="flex gap-2"
+          className="flex gap-2 items-end"
         >
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Ej: 'Me gasté 15k en un café'..."
-            disabled={loading}
-            className="flex-1 bg-slate-900/60 border border-slate-700/50 text-slate-100 text-sm px-4 py-3 rounded-2xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 placeholder:text-slate-600 transition-all shadow-inner"
+          <input 
+            type="file" 
+            accept="image/*" 
+            className="hidden" 
+            ref={fileInputRef}
+            onChange={handleImageSelect}
           />
           <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={loading}
+            className="w-12 h-12 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-2xl flex items-center justify-center transition-all border border-slate-700/50 shrink-0"
+            title="Adjuntar imagen"
+          >
+            <Camera className="w-5 h-5" />
+          </button>
+
+          <div className="flex-1 relative">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              placeholder={selectedImage ? "Añade un comentario o envía..." : "Ej: 'Me gasté 15k en un café'..."}
+              disabled={loading}
+              rows={1}
+              className="w-full bg-slate-900/60 border border-slate-700/50 text-slate-100 text-sm px-4 py-3 rounded-2xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 placeholder:text-slate-600 transition-all shadow-inner resize-none min-h-[48px] max-h-32 py-[13px]"
+            />
+          </div>
+
+          <button
             type="submit"
-            disabled={!input.trim() || loading}
-            className="w-12 h-12 bg-gradient-to-tr from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:from-slate-700 disabled:to-slate-700 disabled:cursor-not-allowed text-white rounded-2xl flex items-center justify-center transition-all shadow-lg shadow-blue-500/20 active:scale-95"
+            disabled={(!input.trim() && !selectedImage) || loading}
+            className="w-12 h-12 bg-gradient-to-tr from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:from-slate-700 disabled:to-slate-700 disabled:cursor-not-allowed text-white rounded-2xl flex items-center justify-center transition-all shadow-lg shadow-blue-500/20 active:scale-95 shrink-0"
           >
             {loading ? (
               <Loader2 className="w-5 h-5 animate-spin text-blue-200" />

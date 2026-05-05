@@ -60,6 +60,7 @@ export interface ChatMessage {
   loading?: boolean;
   transactionId?: string;
   summary?: FinancialSummary;
+  imageUrl?: string;
 }
 
 export interface AppSettings {
@@ -106,6 +107,12 @@ export interface BotResponse {
   summary?: FinancialSummary;
   suggestedNextQuestion?: string;
   emotionalTone?: string;
+}
+
+export interface ChatWithBotRequest {
+  message: string;
+  imageBase64?: string;
+  imageMimeType?: string;
 }
 
 export interface FinancialSummary {
