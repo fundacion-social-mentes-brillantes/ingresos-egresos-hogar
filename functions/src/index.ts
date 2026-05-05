@@ -90,6 +90,104 @@ function normalizeCategory(cat: string): string {
     .replace(/[\u0300-\u036f]/g, ""); // Remove accents/tildes
 }
 
+function canonicalCategory(input: string): string {
+  const normalized = normalizeCategory(input);
+  
+  const mapping: Record<string, string[]> = {
+    'Alimentación': ['comida', 'mercado', 'supermercado', 'almuerzo', 'desayuno', 'cena', 'restaurante', 'domicilio', 'rappi', 'helado', 'cafe', 'panaderia', 'tienda'],
+    'Transporte': ['bus', 'taxi', 'uber', 'didi', 'gasolina', 'parqueadero', 'pasaje', 'moto', 'transporte', 'peaje'],
+    'Hogar': ['arriendo', 'luz', 'agua', 'gas', 'internet', 'servicios', 'aseo', 'hogar', 'casa', 'mercado del hogar'],
+    'Salud': ['medicina', 'medico', 'doctor', 'odontologia', 'farmacia', 'pastillas', 'cita', 'salud'],
+    'Educación': ['curso', 'colegio', 'universidad', 'clase', 'libro', 'capacitacion', 'estudio'],
+    'Entretenimiento': ['cine', 'salida', 'paseo', 'netflix', 'musica', 'diversion', 'juego'],
+    'Ropa': ['ropa', 'zapatos', 'camiseta', 'pantalon', 'vestido'],
+    'Tecnología': ['celular', 'computador', 'software', 'internet', 'app'],
+    'Ahorro': ['ahorro', 'inversion', 'cdt', 'fondo', 'guardar plata'],
+    'Ingreso': ['sueldo', 'salario', 'pago', 'transferencia recibida', 'venta', 'cobro', 'ingreso']
+  };
+
+  for (const [canonical, synonyms] of Object.entries(mapping)) {
+    if (normalized === normalizeCategory(canonical)) return canonical;
+    if (synonyms.some(s => normalizeCategory(s) === normalized)) return canonical;
+  }
+
+  // Si no encaja, capitalizar la primera letra o devolver 'Otros'
+  return input.charAt(0).toUpperCase() + input.slice(1).toLowerCase() || 'Otros';
+}
+
+function canonicalAccountName(input: string, accounts: any[]): string {
+  const normalized = normalizeCategory(input);
+  
+  const mapping: Record<string, string[]> = {
+    'Efectivo': ['efectivo', 'cash', 'contado'],
+    'Nequi': ['nequi', 'neq', 'nequi app'],
+    'Daviplata': ['daviplata', 'davi plata', 'daviplata app'],
+    'Banco': ['banco', 'bancolombia', 'cuenta bancaria', 'transferencia bancaria']
+  };
+
+  for (const [canonical, synonyms] of Object.entries(mapping)) {
+    if (synonyms.some(s => normalizeCategory(s) === normalized)) {
+      // Verificar si el usuario tiene una cuenta con ese nombre canónico
+      const found = accounts.find(a => normalizeCategory(a.name) === normalizeCategory(canonical));
+      if (found) return found.name;
+    }
+  }
+
+  // Si no encuentra por sinónimo, buscar coincidencia exacta
+  const exactMatch = accounts.find(a => normalizeCategory(a.name) === normalized);
+  if (exactMatch) return exactMatch.name;
+
+  // Default: Efectivo o la primera disponible
+  const cashAcc = accounts.find(a => normalizeCategory(a.name) === 'efectivo');
+  return cashAcc ? cashAcc.name : (accounts.length > 0 ? accounts[0].name : 'Efectivo');
+}
+
+function normalizeAmountFromBot(amount: any): number {
+  if (typeof amount === 'number') return amount;
+  if (!amount) return 0;
+
+  let str = String(amount).toLowerCase().trim();
+  
+  // Manejar "mil" (ej: "10 mil" -> 10000)
+  if (str.includes('mil')) {
+    const numPart = parseFloat(str.replace(/[^0-9.]/g, ''));
+    if (!isNaN(numPart)) return numPart * 1000;
+  }
+  
+  // Manejar "lucas" (ej: "50 lucas" -> 50000)
+  if (str.includes('luca')) {
+    const numPart = parseFloat(str.replace(/[^0-9.]/g, ''));
+    if (!isNaN(numPart)) return numPart * 1000;
+  }
+
+  // Manejar "k" (ej: "20k" -> 20000)
+  if (str.endsWith('k')) {
+    const numPart = parseFloat(str.replace(/[^0-9.]/g, ''));
+    if (!isNaN(numPart)) return numPart * 1000;
+  }
+
+  // Manejar "millon" o "millones"
+  if (str.includes('millon')) {
+    const numPart = parseFloat(str.replace(/[^0-9.]/g, ''));
+    if (!isNaN(numPart)) return numPart * 1000000;
+  }
+
+  // Limpiar puntos y comas de formato estándar (10.000 o 10,000)
+  if (str.includes('.') && str.includes(',')) {
+    str = str.replace(/\./g, '').replace(/,/g, '.');
+  } else if (str.includes('.')) {
+    const parts = str.split('.');
+    if (parts[parts.length - 1].length === 3) {
+      str = str.replace(/\./g, '');
+    }
+  } else if (str.includes(',')) {
+    str = str.replace(/,/g, '');
+  }
+
+  const finalNum = parseFloat(str.replace(/[^0-9.]/g, ''));
+  return isNaN(finalNum) ? 0 : finalNum;
+}
+
 async function getSummaryForUser(uid: string, range: string, category?: string): Promise<FinancialSummary> {
   const db = admin.firestore();
   let startDate = startOfMonth(new Date());
@@ -170,27 +268,52 @@ async function callDeepSeek(userMessage: string, context: string, chatHistory: a
 Eres un asistente financiero personal familiar para la app "Ingresos y Egresos Hogar". 
 Tu trabajo es ayudar al usuario a entender, registrar y organizar su dinero de forma sencilla y empática.
 
-PERSONALIDAD Y TONO:
-- Hablas en español colombiano natural (ej: "Listo", "Dale", "¿Cómo vas?", "Te entiendo").
-- Eres cercano, tranquilo, empático y útil. No eres un contador rígido.
-- Si el usuario está preocupado o estresado por el dinero, acompáñalo con calma.
-- Si el usuario habla de temas cotidianos o no financieros, responde de forma natural y humana.
+COMPRENSIÓN DE LENGUAJE NATURAL:
+No eres un bot de comandos. Eres un asistente conversacional financiero familiar. El usuario puede hablar de forma informal, incompleta, con errores de escritura, con modismos colombianos o con frases largas. Tu trabajo es interpretar la intención real.
+
+SINÓNIMOS Y EJEMPLOS DE GASTO (EXPENSE):
+Entiende como gasto frases como: me gasté, gasté, compré, pagué, me tocó pagar, se me fueron, invertí en, puse plata para, mandé plata para, saqué plata para, compramos, pagamos, pagué con Nequi, pagué en efectivo, pasé plata para, cancelé, aboné, hice mercado, tanquié, recargué, compré comida, almorcé, pedí domicilio, pagué servicios, pagué arriendo, pagué internet, pagué luz, pagué agua, pagué gas.
+Regla: Si detectas salida de dinero desde el usuario o su hogar, normalmente es expense.
+
+SINÓNIMOS Y EJEMPLOS DE INGRESO (INCOME):
+Entiende como ingreso frases como: me entró plata, entró plata, recibí, me pagaron, cobré, me consignaron, me depositaron, llegó el sueldo, llegó la quincena, me hicieron transferencia, vendí algo, me dieron, recibimos, ingresé plata, puse ingreso, entró a Nequi, entró a Daviplata, me llegó por banco, me pagaron una deuda.
+Regla: Si detectas entrada de dinero al usuario o al hogar, normalmente es income.
+
+FEW-SHOT EXAMPLES:
+
+Usuario: "me gasté 10 mil en un helado"
+Respuesta JSON: { "intent": "create_transaction", "transaction": { "type": "expense", "amount": 10000, "category": "Alimentación", "accountName": "Efectivo", "description": "helado", "date": "today" }, "confidence": 0.95, "replyToUser": "¡Qué rico un helado! Ya anoté los 10.000 en alimentación." }
+
+Usuario: "compré mercado por 120.000 con nequi"
+Respuesta JSON: { "intent": "create_transaction", "transaction": { "type": "expense", "amount": 120000, "category": "Alimentación", "accountName": "Nequi", "description": "mercado", "date": "today" }, "confidence": 0.98, "replyToUser": "Listo, guardé el mercado por 120.000 pagado con Nequi." }
+
+Usuario: "me pagaron 800.000 del trabajo"
+Respuesta JSON: { "intent": "create_transaction", "transaction": { "type": "income", "amount": 800000, "category": "Ingreso", "accountName": "Efectivo", "description": "pago del trabajo", "date": "today" }, "confidence": 0.92, "replyToUser": "¡Excelente! Ya registré tu pago de 800.000." }
+
+Usuario: "me entraron 50 por daviplata"
+Respuesta JSON: { "intent": "create_transaction", "transaction": { "type": "income", "amount": 50000, "category": "Ingreso", "accountName": "Daviplata", "description": "transferencia recibida", "date": "today" }, "confidence": 0.9, "replyToUser": "Vale, ya sumé esos 50.000 que te llegaron a Daviplata." }
+
+Usuario: "ayer pagué 5000 de bus"
+Respuesta JSON: { "intent": "create_transaction", "transaction": { "type": "expense", "amount": 5000, "category": "Transporte", "accountName": "Efectivo", "description": "pasaje de bus", "date": "yesterday" }, "confidence": 0.95, "replyToUser": "Anotado lo del bus de ayer." }
+
+Usuario: "cómo voy este mes"
+Respuesta JSON: { "intent": "query_summary", "query": { "range": "this_month", "metric": "balance" }, "confidence": 1.0, "replyToUser": "Claro, déjame ver cómo van tus cuentas este mes..." }
+
+Usuario: "cuánto he gastado en comida"
+Respuesta JSON: { "intent": "query_summary", "query": { "range": "this_month", "metric": "by_category", "category": "Alimentación" }, "confidence": 1.0, "replyToUser": "Entendido, voy a revisar cuánto has gastado en comida." }
+
+Usuario: "estoy preocupado porque no me alcanza"
+Respuesta JSON: { "intent": "financial_advice", "confidence": 0.9, "replyToUser": "Te entiendo perfectamente, a veces la situación se pone apretada. Vamos a revisar tus gastos juntos para ver dónde podemos ahorrar un poco, ¿te parece?" }
 
 REGLAS DE OPERACIÓN:
 - Responde SIEMPRE en formato JSON estricto.
 - "intent" debe ser uno de: create_transaction, query_summary, analyze_behavior, financial_advice, update_transaction, delete_transaction, clarify, conversation_only.
 - "replyToUser" es tu respuesta humana.
 - "shouldCreateTransaction" es true solo si tienes: Tipo (gasto/ingreso), Monto y Descripción clara.
-- Si falta información para un registro, usa "intent": "clarify" y pregunta amablemente.
-- Para query_summary, analyze_behavior y financial_advice, NO inventes números. Devuelve el JSON con el intent correcto y el sistema se encargará de poner los datos reales.
-- Fecha: Si detectas una fecha (hoy, ayer, lunes pasado, 15 de marzo), devuélvela en "transaction.date" como YYYY-MM-DD. Si es hoy, usa "today".
-- Categorías: Alimentación, Transporte, Hogar, Salud, Educación, Entretenimiento, Ropa, Tecnología, Ahorro, Ingreso, Otros.
-
-QUERY_SUMMARY:
-- Si el usuario pregunta por gastos de una categoría específica, incluye "category" en el objeto "query".
-
-EDICIÓN Y BORRADO:
-- Si el usuario pide editar o borrar (update_transaction, delete_transaction), responde con "clarify" diciendo que por ahora no puedes hacerlo automáticamente y que debe hacerlo manualmente en la lista de transacciones.
+- Si falta información o la confianza es baja (< 0.75), usa "intent": "clarify" y pregunta amablemente.
+- NO INVENTES DATOS. Para consultas de saldos o gastos, el sistema proveerá la respuesta real basada en el intent.
+- Si el usuario habla de temas no financieros, responde normal y humano. Puedes conectar suavemente con la organización financiera si tiene sentido.
+- Categorías oficiales: Alimentación, Transporte, Hogar, Salud, Educación, Entretenimiento, Ropa, Tecnología, Ahorro, Ingreso, Otros.
 
 CONTEXTO FINANCIERO ACTUAL:
 ${context}
@@ -300,16 +423,18 @@ export const chatWithBot = onCall({ secrets: [DEEPSEEK_API_KEY] }, async (reques
     }
 
     // Acción: Crear transacción
-    if (botAction.intent === 'create_transaction' && botAction.shouldCreateTransaction && botAction.transaction && botAction.confidence >= 0.75) {
+    if (botAction.intent === 'create_transaction' && botAction.transaction && botAction.confidence >= 0.75) {
       const tx = botAction.transaction;
-      const amount = Number(tx.amount);
+      const amount = normalizeAmountFromBot(tx.amount);
+      const category = canonicalCategory(tx.category || 'Otros');
+      const accountName = canonicalAccountName(tx.accountName || 'Efectivo', accounts);
 
-      if (isNaN(amount) || !isFinite(amount) || amount <= 0) {
-        botAction.replyToUser = "No alcancé a identificar bien el valor. ¿Me dices cuánto fue?";
+      if (amount <= 0 || !tx.description || !tx.type) {
+        botAction.replyToUser = "No alcancé a identificar bien todos los detalles del movimiento (monto, tipo o descripción). ¿Podrías aclarármelo?";
         botAction.intent = 'clarify';
         botAction.shouldCreateTransaction = false;
       } else {
-        let account = accounts.find(a => a.name.toLowerCase() === tx.accountName?.toLowerCase());
+        let account = accounts.find(a => a.name === accountName);
         if (!account) account = accounts.find(a => a.name === 'Efectivo') || accounts[0];
 
         if (account) {
@@ -318,8 +443,10 @@ export const chatWithBot = onCall({ secrets: [DEEPSEEK_API_KEY] }, async (reques
           const accRef = db.collection('users').doc(uid).collection('accounts').doc(account.id);
 
           batch.set(txRef, {
-            ...tx,
-            amount,
+            type: tx.type,
+            amount: amount,
+            category: category,
+            description: tx.description,
             accountId: account.id,
             accountName: account.name,
             currency: 'COP',
