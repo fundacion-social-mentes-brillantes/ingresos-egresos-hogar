@@ -1,5 +1,9 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
+import { auth, callSeedDefaultUserData } from '../lib/firebase';
+import { createUserProfile, getUserProfile } from '../lib/firestore';
 import {
+  GoogleAuthProvider,
+  signInWithPopup,
   onAuthStateChanged,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
@@ -7,14 +11,13 @@ import {
   updateProfile,
   type User,
 } from 'firebase/auth';
-import { auth, callSeedDefaultUserData } from '../lib/firebase';
-import { createUserProfile } from '../lib/firestore';
 
 interface AuthContextType {
   user: User | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string, displayName: string) => Promise<void>;
+  signInWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -53,12 +56,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const signInWithGoogle = async () => {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+
+    const cred = await signInWithPopup(auth, provider);
+    const firebaseUser = cred.user;
+
+    const existingProfile = await getUserProfile(firebaseUser.uid);
+
+    if (!existingProfile) {
+      await createUserProfile(firebaseUser.uid, {
+        displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Usuario',
+        email: firebaseUser.email || '',
+        defaultCurrency: 'COP',
+      });
+
+      try {
+        await callSeedDefaultUserData({});
+      } catch (e) {
+        console.warn('Could not seed default data after Google sign-in:', e);
+      }
+    }
+  };
+
   const logout = async () => {
     await signOut(auth);
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, signIn, signUp, logout }}>
+    <AuthContext.Provider value={{ user, loading, signIn, signUp, signInWithGoogle, logout }}>
       {children}
     </AuthContext.Provider>
   );
