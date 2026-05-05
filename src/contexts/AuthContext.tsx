@@ -4,6 +4,8 @@ import { createUserProfile, getUserProfile } from '../lib/firestore';
 import {
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   onAuthStateChanged,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
@@ -27,8 +29,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser]       = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const ensureUserProfile = async (firebaseUser: User) => {
+    try {
+      const existingProfile = await getUserProfile(firebaseUser.uid);
+      if (!existingProfile) {
+        await createUserProfile(firebaseUser.uid, {
+          displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Usuario',
+          email: firebaseUser.email || '',
+          defaultCurrency: 'COP',
+        });
+
+        try {
+          await callSeedDefaultUserData({});
+        } catch (e) {
+          console.warn('Could not seed default data:', e);
+        }
+      }
+    } catch (err) {
+      console.error('Error in ensureUserProfile:', err);
+    }
+  };
+
   useEffect(() => {
+    // Handle redirect result if any
+    getRedirectResult(auth).catch((err) => {
+      console.error('Redirect result error:', err);
+    });
+
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        await ensureUserProfile(firebaseUser);
+      }
       setUser(firebaseUser);
       setLoading(false);
     });
@@ -58,24 +89,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signInWithGoogle = async () => {
     const provider = new GoogleAuthProvider();
-    provider.setCustomParameters({ prompt: 'select_account' });
+    provider.setCustomParameters({ 
+      prompt: 'select_account',
+      // Useful for cross-domain auth issues
+      display: 'popup'
+    });
 
-    const cred = await signInWithPopup(auth, provider);
-    const firebaseUser = cred.user;
-
-    const existingProfile = await getUserProfile(firebaseUser.uid);
-
-    if (!existingProfile) {
-      await createUserProfile(firebaseUser.uid, {
-        displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Usuario',
-        email: firebaseUser.email || '',
-        defaultCurrency: 'COP',
-      });
-
-      try {
-        await callSeedDefaultUserData({});
-      } catch (e) {
-        console.warn('Could not seed default data after Google sign-in:', e);
+    try {
+      await signInWithPopup(auth, provider);
+      // Profile creation handled by onAuthStateChanged
+    } catch (err: any) {
+      // If popup is blocked, fallback to redirect
+      if (err.code === 'auth/popup-blocked' || err.code === 'auth/cancelled-by-user') {
+        console.log('Popup blocked or cancelled, trying redirect...');
+        await signInWithRedirect(auth, provider);
+      } else {
+        throw err;
       }
     }
   };

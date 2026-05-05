@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { Button } from '../components/ui/Button';
@@ -6,8 +6,15 @@ import { Input } from '../components/ui/Input';
 import { Mail, Lock, User, TrendingUp, AlertCircle } from 'lucide-react';
 
 export function LoginPage() {
-  const { signIn, signUp, signInWithGoogle } = useAuth();
+  const { user, signIn, signUp, signInWithGoogle } = useAuth();
   const navigate = useNavigate();
+
+  // Redirigir si ya está logueado
+  useEffect(() => {
+    if (user) {
+      navigate('/dashboard');
+    }
+  }, [user, navigate]);
 
   const [mode, setMode]         = useState<'login' | 'register'>('login');
   const [loading, setLoading]   = useState(false);
@@ -22,15 +29,24 @@ export function LoginPage() {
     setLoading(true);
     try {
       await signInWithGoogle();
-      navigate('/dashboard');
-    } catch (err: unknown) {
-      const code = (err as { code?: string })?.code ?? '';
+      // El navigate se hace por el useEffect de arriba o si signInWithGoogle termina exitosamente
+      // navigate('/dashboard'); 
+    } catch (err: any) {
+      console.error('Google Sign-In Error:', err);
+      const code = err.code ?? '';
+      const msg = err.message ?? '';
       if (code === 'auth/popup-closed-by-user') {
         setError('Cerraste la ventana de Google antes de terminar.');
       } else if (code === 'auth/popup-blocked') {
-        setError('El navegador bloqueó la ventana de Google. Permite ventanas emergentes e intenta de nuevo.');
+        setError('El navegador bloqueó la ventana. Redirigiendo para intentar de nuevo...');
+      } else if (code === 'auth/unauthorized-domain') {
+        setError('Este dominio no está autorizado en Firebase. Avisa al administrador.');
+      } else if (code === 'auth/operation-not-allowed') {
+        setError('El inicio de sesión con Google no está habilitado en Firebase.');
+      } else if (code === 'auth/account-exists-with-different-credential') {
+        setError('Ya existe una cuenta con este correo usando otro método de acceso.');
       } else {
-        setError('No se pudo iniciar sesión con Google. Intenta de nuevo.');
+        setError(`Error: ${code || msg || 'No se pudo iniciar sesión con Google.'}`);
       }
     } finally {
       setLoading(false);
@@ -130,7 +146,7 @@ export function LoginPage() {
                 style={{ fill: '#EA4335' }}
               />
             </svg>
-            <span className="text-slate-200 font-medium">Continuar con Google</span>
+            <span className="text-slate-200 font-medium">Entrar o crear cuenta con Google</span>
           </button>
 
           <div className="flex items-center gap-4 text-slate-500 py-2">
