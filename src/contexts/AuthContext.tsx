@@ -100,7 +100,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Profile creation handled by onAuthStateChanged
     } catch (err: any) {
       // If popup is blocked, fallback to redirect
-      if (err.code === 'auth/popup-blocked' || err.code === 'auth/cancelled-by-user') {
+      if (err.code === 'auth/popup-blocked' || err.code === 'auth/cancelled-popup-request' || err.code === 'auth/popup-closed-by-user') {
         console.log('Popup blocked or cancelled, trying redirect...');
         await signInWithRedirect(auth, provider);
       } else {

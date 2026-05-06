@@ -329,15 +329,15 @@ ${context}
 FECHA ACTUAL (Colombia): ${format(new Date(), 'yyyy-MM-dd HH:mm')}
 `;
 
-  // Construir el contenido del mensaje del usuario (Multimodal)
-  const userContent: any[] = [{ type: 'text', text: userMessage }];
+  // Construir el contenido del mensaje del usuario
+  let userContent: any;
   if (imageBase64 && imageMimeType) {
-    userContent.push({
-      type: 'image_url',
-      image_url: {
-        url: `data:${imageMimeType};base64,${imageBase64}`
-      }
-    });
+    userContent = [
+      { type: 'text', text: userMessage },
+      { type: 'image_url', image_url: { url: `data:${imageMimeType};base64,${imageBase64}` } }
+    ];
+  } else {
+    userContent = userMessage;
   }
 
   const messages = [
@@ -434,15 +434,40 @@ export const chatWithBot = onCall({ secrets: [DEEPSEEK_API_KEY] }, async (reques
     Resumen mes: Ingresos $${monthlySummary.totalIncome}, Gastos $${monthlySummary.totalExpenses}, Balance $${monthlySummary.balance}
     `;
 
-    // 4. Llamar a la IA (Pasando la imagen si existe)
-    const botAction = await callDeepSeek(
-      message, 
-      imageBase64 || null, 
-      imageMimeType || null, 
-      context, 
-      chatHistory, 
-      DEEPSEEK_API_KEY.value()
-    );
+    // 4. Validar imagen si existe
+    if (imageBase64) {
+      if (!imageMimeType || !imageMimeType.startsWith('image/')) {
+        throw new HttpsError('invalid-argument', 'El formato del archivo no es una imagen válida.');
+      }
+      // Limite aprox 10MB en base64 (1 byte base64 ~= 0.75 bytes reales)
+      if (imageBase64.length > 12 * 1024 * 1024) { 
+        throw new HttpsError('invalid-argument', 'La imagen es demasiado pesada. Intenta con una más pequeña.');
+      }
+    }
+
+    // 5. Llamar a la IA (Pasando la imagen si existe)
+    let botAction: BotAction;
+    try {
+      botAction = await callDeepSeek(
+        message, 
+        imageBase64 || null, 
+        imageMimeType || null, 
+        context, 
+        chatHistory, 
+        DEEPSEEK_API_KEY.value()
+      );
+    } catch (error: any) {
+      // Si el error es por imagen/modelo, dar respuesta amable sin romper el chat
+      if (imageBase64 && (error.message?.includes('model') || error.message?.includes('image') || error.status === 400)) {
+        botAction = {
+          intent: 'clarify',
+          replyToUser: "El modelo actual no pudo leer la imagen. Escríbeme el valor o intenta con una foto más clara.",
+          confidence: 1.0
+        };
+      } else {
+        throw error;
+      }
+    }
 
     // 5. Ejecutar acciones basadas en la intención
     let transactionCreated = null;
