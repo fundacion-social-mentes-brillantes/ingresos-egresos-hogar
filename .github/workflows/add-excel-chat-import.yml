@@ -1,0 +1,254 @@
+name: Add Excel Chat Import
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/add-excel-chat-import.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Wire Excel upload into chat and DeepSeek prompt
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          chat_path = Path('src/pages/ChatPage.tsx')
+          chat = chat_path.read_text()
+
+          chat = chat.replace(
+            "import { DEFAULT_ACCOUNTS, formatCOP } from '../types';",
+            "import { DEFAULT_ACCOUNTS, formatCOP } from '../types';\nimport { parseExcelFile, type ImportPreviewResult } from '../lib/importExcel';\nimport { exportTransactionsToExcel } from '../lib/exportExcel';"
+          )
+          chat = chat.replace("  Camera,\n", "  Camera,\n  FileSpreadsheet,\n  Download,\n")
+
+          # Extend call signature to send Excel context to Vercel DeepSeek route
+          chat = chat.replace(
+            "async function callVercelDeepSeek(actionPayload: Record<string, unknown>): Promise<VercelBotAction> {",
+            "async function callVercelDeepSeek(actionPayload: Record<string, unknown>): Promise<VercelBotAction> {"
+          )
+          chat = chat.replace(
+            "  imageData: { base64: string; mime: string } | null,\n  currentMessages: ChatMessage[]\n) {",
+            "  imageData: { base64: string; mime: string } | null,\n  currentMessages: ChatMessage[],\n  excelImportContext?: string\n) {"
+          )
+          chat = chat.replace(
+            "    imageMimeType: imageData?.mime,\n    context,\n    chatHistory: currentMessages.slice(-20),\n  });",
+            "    imageMimeType: imageData?.mime,\n    context,\n    chatHistory: currentMessages.slice(-20),\n    excelImportContext,\n  });"
+          )
+
+          # Add pending import state after selectedImage state
+          chat = chat.replace(
+            "  const [selectedImage, setSelectedImage] = useState<{ base64: string; mime: string; preview: string } | null>(null);",
+            "  const [selectedImage, setSelectedImage] = useState<{ base64: string; mime: string; preview: string } | null>(null);\n  const [pendingImport, setPendingImport] = useState<ImportPreviewResult | null>(null);"
+          )
+
+          helper = r'''
+
+function buildExcelContext(result: ImportPreviewResult, fileName: string): string {
+  const income = result.drafts.filter((tx) => tx.type === 'income').reduce((sum, tx) => sum + tx.amount, 0);
+  const expense = result.drafts.filter((tx) => tx.type === 'expense').reduce((sum, tx) => sum + tx.amount, 0);
+  const sample = result.drafts.slice(0, 25).map((tx, index) => (
+    `${index + 1}. ${tx.date.toLocaleDateString('es-CO')} | ${tx.type === 'income' ? 'Ingreso' : 'Gasto'} | ${formatCOP(tx.amount)} | ${tx.category} | ${tx.accountName} | ${tx.description}`
+  ));
+
+  return [
+    `Archivo: ${fileName}`,
+    `Filas leídas: ${result.rowsRead}`,
+    `Movimientos detectados: ${result.drafts.length}`,
+    `Ingresos detectados: ${formatCOP(income)}`,
+    `Gastos detectados: ${formatCOP(expense)}`,
+    `Balance detectado: ${formatCOP(income - expense)}`,
+    `Muestra organizada:\n${sample.join('\n')}`,
+    result.skipped.length ? `Filas dudosas o saltadas:\n${result.skipped.join('\n')}` : 'No se detectaron filas dudosas importantes.',
+  ].join('\n\n');
+}
+
+function looksLikeImportConfirmation(message: string): boolean {
+  const text = normalizeText(message);
+  return Boolean(text.match(/\b(guardar|guarda|importar|importa|confirmo|confirmar|si|sí|dale|listo|subelo|súbelo)\b/));
+}
+'''
+          marker = "async function runVercelDeepSeekChat("
+          if "function buildExcelContext" not in chat:
+            chat = chat.replace(marker, helper + "\n" + marker)
+
+          # Add export and import confirmation handling near start of handleSend after finalMessage
+          old = """    const finalMessage = messageText || 'Analiza esta imagen y dime si hay un gasto o ingreso para registrar.';
+    setInput('');
+    const imageData = selectedImage;
+    setSelectedImage(null);
+    setLoading(true);
+    setIsTyping(true);
+    setChatError(null);
+
+    try {
+      await auth.currentUser.getIdToken(true);
+      await runVercelDeepSeekChat(
+        user.uid,
+        finalMessage,
+        imageData ? { base64: imageData.base64, mime: imageData.mime } : null,
+        messages
+      );
+"""
+          new = """    const finalMessage = messageText || 'Analiza esta imagen y dime si hay un gasto o ingreso para registrar.';
+    setInput('');
+    const imageData = selectedImage;
+    setSelectedImage(null);
+    setLoading(true);
+    setIsTyping(true);
+    setChatError(null);
+
+    try {
+      await auth.currentUser.getIdToken(true);
+
+      const normalizedMessage = normalizeText(finalMessage);
+      if (normalizedMessage.includes('descargar excel') || normalizedMessage.includes('exportar excel') || normalizedMessage.includes('sacar excel')) {
+        await addChatMessage(user.uid, { text: finalMessage, sender: 'user' });
+        const transactions = await getTransactions(user.uid, 500);
+        exportTransactionsToExcel(transactions, 'finanzas-organizadas-ingresos-egresos.xlsx');
+        await addChatMessage(user.uid, {
+          text: `Listo, preparé un Excel organizado con ${transactions.length} movimientos. Se descargó con una hoja de Resumen y otra de Movimientos.`,
+          sender: 'bot',
+          emotionalTone: 'encouraging',
+          intent: 'conversation_only',
+        } as any);
+        return;
+      }
+
+      if (pendingImport && looksLikeImportConfirmation(finalMessage)) {
+        await addChatMessage(user.uid, { text: finalMessage, sender: 'user' });
+        for (const draft of pendingImport.drafts) {
+          await addTransaction(user.uid, draft);
+        }
+        const savedCount = pendingImport.drafts.length;
+        setPendingImport(null);
+        await addChatMessage(user.uid, {
+          text: `Listo, importé ${savedCount} movimientos del Excel. Ya quedaron en Movimientos y el dashboard debe actualizarse en tiempo real.`,
+          sender: 'bot',
+          emotionalTone: 'encouraging',
+          intent: 'import_transactions',
+        } as any);
+        return;
+      }
+
+      await runVercelDeepSeekChat(
+        user.uid,
+        finalMessage,
+        imageData ? { base64: imageData.base64, mime: imageData.mime } : null,
+        messages
+      );
+"""
+          if old not in chat:
+            raise SystemExit('handleSend block not found')
+          chat = chat.replace(old, new)
+
+          # Enhance file picker to accept Excel and parse it before image processing
+          old_file_start = """  const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      setChatError({ friendly: 'Por favor selecciona una imagen válida.', code: 'imagen-invalida' });
+      return;
+    }
+"""
+          new_file_start = """  const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user) return;
+
+    const isExcel = /\\.(xlsx|xls|csv)$/i.test(file.name);
+    if (isExcel) {
+      setLoading(true);
+      setIsTyping(true);
+      setChatError(null);
+      setSelectedImage(null);
+      try {
+        const accounts = await ensureLocalAccounts(user.uid);
+        const result = await parseExcelFile(file, accounts);
+        setPendingImport(result);
+        const excelContext = buildExcelContext(result, file.name);
+        await runVercelDeepSeekChat(
+          user.uid,
+          `Subí el Excel "${file.name}". Organízalo, analízalo y dime si está listo para importarlo.`,
+          null,
+          messages,
+          excelContext
+        );
+      } catch (err: any) {
+        setChatError({ friendly: err?.message || 'No pude leer el Excel.', code: 'excel-invalido' });
+      } finally {
+        setLoading(false);
+        setIsTyping(false);
+        e.target.value = '';
+      }
+      return;
+    }
+
+    if (!file.type.startsWith('image/')) {
+      setChatError({ friendly: 'Puedes subir una imagen, Excel .xlsx/.xls o CSV.', code: 'archivo-invalido' });
+      return;
+    }
+"""
+          if old_file_start not in chat:
+            raise SystemExit('file handler start not found')
+          chat = chat.replace(old_file_start, new_file_start)
+
+          chat = chat.replace('accept="image/*"', 'accept="image/*,.xlsx,.xls,.csv"')
+          chat = chat.replace('<Camera className="w-5 h-5" />', '<FileSpreadsheet className="w-5 h-5" />', 1)
+          chat = chat.replace('title="Adjuntar imagen"', 'title="Adjuntar imagen, Excel o CSV"')
+          chat = chat.replace(
+            "placeholder={selectedImage ? 'Añade un comentario o envía...' : \"Escríbeme normal: registra, borra, consulta o razona conmigo...\"}",
+            "placeholder={pendingImport ? 'Escribe: guardar estos movimientos...' : selectedImage ? 'Añade un comentario o envía...' : \"Escríbeme normal: registra, borra, consulta, importa Excel o pide descargar Excel...\"}"
+          )
+
+          chat_path.write_text(chat)
+
+          api = Path('api/deepseek-chat.ts')
+          text = api.read_text()
+          text = text.replace(
+            "const { message, imageBase64, imageMimeType, context, chatHistory } = req.body || {};",
+            "const { message, imageBase64, imageMimeType, context, chatHistory, excelImportContext } = req.body || {};"
+          )
+          text = text.replace(
+            "const hasImage = Boolean(imageBase64 && imageMimeType);\n  const systemPrompt = `",
+            "const hasImage = Boolean(imageBase64 && imageMimeType);\n  const excelContextBlock = excelImportContext\n    ? `\\n\\nEXCEL ADJUNTO POR EL USUARIO:\\n${String(excelImportContext).slice(0, 12000)}\\n\\nAnaliza este Excel como migración financiera. Explica ingresos, gastos, balance, filas dudosas y pregunta si quiere guardar/importar. No digas que ya guardaste si aún no confirmó.`\n    : '';\n  const systemPrompt = `"
+          )
+          text = text.replace(
+            "Ser un copiloto financiero conversacional: natural, inteligente, práctico, audaz y conectado con el programa. El usuario debe poder hablar contigo como habla con una IA avanzada: puede dialogar, consultar, razonar, pedir estrategia, registrar, borrar, corregir y analizar movimientos.",
+            "Ser un copiloto financiero conversacional: natural, inteligente, práctico, audaz y conectado con el programa. El usuario debe poder hablar contigo como habla con una IA avanzada: puede dialogar, consultar, razonar, pedir estrategia, registrar, borrar, corregir, analizar movimientos, organizar Excel y preparar migraciones financieras."
+          )
+          text = text.replace(
+            "5. Pedir aclaración solo si falta un dato esencial o si ejecutarías algo mal.",
+            "5. Analizar Excel/CSV adjunto: detectar ingresos, gastos, categorías, cuentas, fechas, errores y oportunidades de orden.\n6. Pedir aclaración solo si falta un dato esencial o si ejecutarías algo mal."
+          )
+          text = text.replace(
+            "\"intent\": \"create_transaction\" | \"query_summary\" | \"analyze_behavior\" | \"financial_advice\" | \"update_transaction\" | \"delete_transaction\" | \"clarify\" | \"conversation_only\",",
+            "\"intent\": \"create_transaction\" | \"query_summary\" | \"analyze_behavior\" | \"financial_advice\" | \"update_transaction\" | \"delete_transaction\" | \"clarify\" | \"conversation_only\" | \"import_transactions\","
+          )
+          text = text.replace(
+            "- Si pregunta \"cómo voy\", \"analiza\", \"qué recomiendas\", usa query_summary, analyze_behavior o financial_advice.\n- No inventes cifras que no estén en el contexto. Si faltan datos reales, dilo y sugiere qué registrar.",
+            "- Si pregunta \"cómo voy\", \"analiza\", \"qué recomiendas\", usa query_summary, analyze_behavior o financial_advice.\n- Si hay Excel adjunto, usa import_transactions o conversation_only, razona sobre los datos y pide confirmación para guardarlos.\n- No inventes cifras que no estén en el contexto. Si faltan datos reales, dilo y sugiere qué registrar."
+          )
+          text = text.replace(
+            "${String(context || 'Sin contexto disponible')}\n`;",
+            "${String(context || 'Sin contexto disponible')}\n${excelContextBlock}\n`;"
+          )
+          api.write_text(text)
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "fundacionsocial-debug"
+          git config user.email "fundacionsocial@gimnasioemocionalmb.com"
+          git add src/pages/ChatPage.tsx api/deepseek-chat.ts
+          git commit -m "Allow Excel import directly from chat" || exit 0
+          git push
