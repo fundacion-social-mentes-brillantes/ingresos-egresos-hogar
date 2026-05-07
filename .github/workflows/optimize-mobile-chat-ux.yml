@@ -1,0 +1,146 @@
+name: Optimize Mobile Chat UX
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/optimize-mobile-chat-ux.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Make chat feel native on mobile
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          # App shell: better viewport, safe bottom, no unnecessary side padding on small phones.
+          Path('src/components/layout/AppLayout.tsx').write_text("""import { Sidebar, BottomNav } from './Sidebar';
+
+interface AppLayoutProps {
+  children: React.ReactNode;
+}
+
+export function AppLayout({ children }: AppLayoutProps) {
+  return (
+    <div className=\"min-h-[100dvh] bg-surface-900 overflow-x-hidden\">
+      <Sidebar />
+      <main className=\"md:ml-64 min-h-[100dvh] pb-[calc(4.75rem+env(safe-area-inset-bottom))] md:pb-0\">
+        <div className=\"mx-auto w-full max-w-6xl px-2 sm:px-4 md:px-6 py-2 sm:py-5 md:py-6\">
+          {children}
+        </div>
+      </main>
+      <BottomNav />
+    </div>
+  );
+}
+""")
+
+          # Bottom navigation: more app-like and safe-area aware.
+          sidebar = Path('src/components/layout/Sidebar.tsx')
+          text = sidebar.read_text()
+          text = text.replace(
+            'className="fixed bottom-0 left-0 right-0 glass border-t border-slate-700/40 flex md:hidden z-40"',
+            'className="fixed bottom-0 left-0 right-0 bg-slate-950/90 backdrop-blur-xl border-t border-slate-700/50 flex md:hidden z-50 pb-[env(safe-area-inset-bottom)] shadow-2xl"'
+          )
+          text = text.replace(
+            "'flex-1 flex flex-col items-center gap-1 py-3 text-xs transition-all duration-200'",
+            "'flex-1 flex h-16 flex-col items-center justify-center gap-1 py-2 text-[11px] font-medium transition-all duration-200'"
+          )
+          sidebar.write_text(text)
+
+          # Dashboard: on phones the chat becomes the main full-height screen, like ChatGPT/Gemini.
+          dash = Path('src/pages/DashboardPage.tsx')
+          text = dash.read_text()
+          text = text.replace(
+            'className="grid grid-cols-1 lg:grid-cols-12 gap-6 pb-8"',
+            'className="flex h-[calc(100dvh-5.25rem-env(safe-area-inset-bottom))] min-h-[560px] flex-col xl:grid xl:h-auto xl:min-h-[calc(100dvh-6rem)] xl:grid-cols-12 xl:gap-6 xl:pb-8"'
+          )
+          text = text.replace(
+            'className="lg:col-span-7 xl:col-span-8 flex flex-col h-[600px] lg:h-[calc(100vh-8rem)]"',
+            'className="flex min-h-0 flex-1 flex-col xl:col-span-8 2xl:col-span-9 xl:h-[calc(100dvh-8rem)]"'
+          )
+          text = text.replace('className="mb-4"', 'className="mb-2 shrink-0 px-1 sm:mb-4"', 1)
+          text = text.replace('className="text-2xl font-bold text-slate-100"', 'className="text-xl font-bold text-slate-100 sm:text-2xl"')
+          text = text.replace(
+            'className="flex-1 glass rounded-3xl overflow-hidden border border-slate-700/40 flex flex-col shadow-2xl shadow-blue-500/5"',
+            'className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-3xl border border-slate-700/40 bg-slate-900/60 shadow-2xl shadow-blue-500/5 sm:glass"'
+          )
+          text = text.replace(
+            'className="lg:col-span-5 xl:col-span-4 space-y-6 overflow-y-auto lg:h-[calc(100vh-8rem)] pr-1 custom-scrollbar"',
+            'className="hidden xl:col-span-4 2xl:col-span-3 xl:block xl:space-y-6 xl:overflow-y-auto xl:h-[calc(100dvh-8rem)] xl:pr-1 custom-scrollbar"'
+          )
+          dash.write_text(text)
+
+          # Chat: compact native mobile layout, bigger tappable controls, no iOS zoom in textarea.
+          chat = Path('src/pages/ChatPage.tsx')
+          text = chat.read_text()
+          text = text.replace(
+            "className={`flex flex-col h-full min-h-0 bg-slate-900/40 relative ${embedded ? '' : 'max-w-5xl mx-auto w-full glass rounded-3xl overflow-hidden shadow-2xl'}`}",
+            "className={`flex min-h-0 flex-col bg-slate-900/40 relative ${embedded ? 'h-full' : 'h-[calc(100dvh-7.25rem-env(safe-area-inset-bottom))] max-w-5xl mx-auto w-full glass rounded-3xl overflow-hidden shadow-2xl'}`}`"
+          )
+          text = text.replace(
+            'className="px-4 sm:px-6 py-4 border-b border-slate-700/50 flex items-center justify-between bg-slate-800/20"',
+            'className="shrink-0 border-b border-slate-700/50 bg-slate-800/30 px-4 py-3 sm:px-6 sm:py-4"'
+          )
+          text = text.replace(
+            'className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-5 space-y-4 custom-scrollbar"',
+            'className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 py-4 sm:px-5 sm:py-5 space-y-4 custom-scrollbar"'
+          )
+          text = text.replace(
+            'className={`max-w-[92%] sm:max-w-[85%] px-4 py-2.5 rounded-2xl text-sm shadow-sm ${',
+            'className={`max-w-[92%] sm:max-w-[85%] px-4 py-2.5 rounded-2xl text-[15px] leading-relaxed shadow-sm ${'
+          )
+          text = text.replace(
+            'className="p-3 sm:p-4 border-t border-slate-700/50 bg-slate-800/30"',
+            'className="shrink-0 border-t border-slate-700/50 bg-slate-950/80 p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur-xl sm:p-4 md:pb-4"'
+          )
+          text = text.replace(
+            'className="w-full bg-slate-900/60 border border-slate-700/50 text-slate-100 text-sm px-4 py-3 rounded-2xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 placeholder:text-slate-600 transition-all shadow-inner resize-none min-h-[48px] max-h-32 py-[13px]"',
+            'className="w-full resize-none rounded-2xl border border-slate-700/50 bg-slate-900/80 px-4 py-[13px] text-base text-slate-100 shadow-inner transition-all min-h-[48px] max-h-32 placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 sm:text-sm"'
+          )
+          chat.write_text(text)
+
+          # Global mobile polish.
+          css = Path('src/index.css')
+          text = css.read_text()
+          additions = """
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  overscroll-behavior-y: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+@supports (height: 100dvh) {
+  body,
+  #root {
+    min-height: 100dvh;
+  }
+}
+"""
+          if 'overscroll-behavior-y: none;' not in text:
+            text += additions
+          css.write_text(text)
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "fundacionsocial-debug"
+          git config user.email "fundacionsocial@gimnasioemocionalmb.com"
+          git add src/components/layout/AppLayout.tsx src/components/layout/Sidebar.tsx src/pages/DashboardPage.tsx src/pages/ChatPage.tsx src/index.css
+          git commit -m "Optimize mobile chat experience" || exit 0
+          git push
