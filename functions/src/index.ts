@@ -7,6 +7,7 @@ import { startOfMonth, endOfMonth, subDays, startOfDay, format } from 'date-fns'
 admin.initializeApp();
 
 const DEEPSEEK_API_KEY = defineSecret('DEEPSEEK_API_KEY');
+const PUBLIC_CALLABLE_OPTIONS = { invoker: 'public' as const };
 
 type BotIntent =
   | 'create_transaction'
@@ -506,7 +507,7 @@ FECHA ACTUAL (Colombia): ${format(new Date(), 'yyyy-MM-dd HH:mm')}
   }
 }
 
-export const chatWithBot = onCall({ secrets: [DEEPSEEK_API_KEY] }, async (request) => {
+export const chatWithBot = onCall({ ...PUBLIC_CALLABLE_OPTIONS, secrets: [DEEPSEEK_API_KEY] }, async (request) => {
   const { message, imageBase64, imageMimeType } = request.data || {};
   const hasImage = Boolean(imageBase64);
 
@@ -738,13 +739,13 @@ Resumen mes: Ingresos $${monthlySummary.totalIncome}, Gastos $${monthlySummary.t
   }
 });
 
-export const getFinancialSummary = onCall(async (request) => {
+export const getFinancialSummary = onCall(PUBLIC_CALLABLE_OPTIONS, async (request) => {
   if (!request.auth) throw new HttpsError('unauthenticated', 'Autenticación requerida.');
   const { range, category } = request.data || {};
   return await getSummaryForUser(request.auth.uid, range || 'this_month', category ? canonicalCategory(category) : undefined);
 });
 
-export const seedDefaultUserData = onCall(async (request) => {
+export const seedDefaultUserData = onCall(PUBLIC_CALLABLE_OPTIONS, async (request) => {
   if (!request.auth) throw new HttpsError('unauthenticated', 'Autenticación requerida.');
   await ensureDefaultAccounts(request.auth.uid);
   return { success: true };
