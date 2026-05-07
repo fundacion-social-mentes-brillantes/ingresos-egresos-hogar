@@ -1,0 +1,153 @@
+name: Professional Finance Upgrade
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/professional-finance-upgrade.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Patch Firestore rules, AI, chat and dashboard
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          # 1) Firestore rules: allow debts subcollection for each owner
+          rules_path = Path('firestore.rules')
+          rules = rules_path.read_text()
+          if 'match /debts/{debtId}' not in rules:
+            rules = rules.replace(
+              "      // Chat history: Isolated by user\n      match /chatMessages/{messageId} {\n        allow read, write: if isOwner(userId);\n      }",
+              "      // Chat history: Isolated by user\n      match /chatMessages/{messageId} {\n        allow read, write: if isOwner(userId);\n      }\n\n      // Debts and loans: Isolated by user\n      match /debts/{debtId} {\n        allow read, write: if isOwner(userId);\n      }"
+            )
+            rules_path.write_text(rules)
+
+          # 2) DeepSeek prompt and history upgrades
+          api_path = Path('api/deepseek-chat.ts')
+          api = api_path.read_text()
+          api = api.replace('return history.slice(-20).map((m) => ({', 'return history.slice(-30).map((m) => ({')
+          api = api.replace("content: String(m?.text || '').slice(0, 1800),", "content: String(m?.text || '').slice(0, 2500),")
+          api = api.replace(
+            "9. Pedir aclaración solo si falta un dato esencial o si ejecutarías algo mal.",
+            "9. Corregir movimientos recientes cuando el usuario diga cosas como: cambia ese gasto a 80 mil, corrige el último ingreso, cambia categoría a hogar.\n10. Buscar movimientos y deudas por lenguaje natural usando el contexto real recibido.\n11. Analizar el mes con fugas, hábitos, metas, alertas, categorías frecuentes y próximos pasos.\n12. Pedir aclaración antes de acciones peligrosas si el objetivo no es claro."
+          )
+          api = api.replace(
+            "\"intent\": \"create_transaction\" | \"query_summary\" | \"analyze_behavior\" | \"financial_advice\" | \"update_transaction\" | \"delete_transaction\" | \"create_debt\" | \"query_debts\" | \"register_debt_payment\" | \"close_debt\" | \"clarify\" | \"conversation_only\" | \"import_transactions\",",
+            "\"intent\": \"create_transaction\" | \"query_summary\" | \"analyze_behavior\" | \"financial_advice\" | \"update_transaction\" | \"delete_transaction\" | \"create_debt\" | \"query_debts\" | \"register_debt_payment\" | \"close_debt\" | \"clarify\" | \"conversation_only\" | \"import_transactions\","
+          )
+          if 'Para corregir movimiento:' not in api:
+            api = api.replace(
+              "Para crear deuda o plata prestada:",
+              "Para corregir movimiento:\n{\n  \"intent\": \"update_transaction\",\n  \"updateTarget\": {\n    \"scope\": \"last\" | \"last_income\" | \"last_expense\" | \"amount_match\",\n    \"type\": \"income\" | \"expense\" | null,\n    \"amount\": número | null,\n    \"descriptionHint\": \"texto opcional\"\n  },\n  \"transactionUpdate\": {\n    \"amount\": número | null,\n    \"category\": \"categoría opcional\",\n    \"description\": \"descripción opcional\"\n  },\n  \"replyToUser\": \"respuesta natural\",\n  \"confidence\": 0.95,\n  \"emotionalTone\": \"neutral\"\n}\n\nPara crear deuda o plata prestada:"
+            )
+          api = api.replace(
+            "- Si dice \"borra eso\", \"borra el anterior\", \"deshazlo\", usa delete_transaction con scope last.",
+            "- Si dice \"cambia ese gasto a 80 mil\", \"corrige el último ingreso\", \"ese no era de 50 sino de 35\", usa update_transaction.\n- Si dice \"borra eso\", \"borra el anterior\", \"deshazlo\", usa delete_transaction con scope last si el objetivo es claro; si hay duda, usa clarify y pregunta antes de borrar."
+          )
+          api = api.replace(
+            "- Si pregunta \"cómo voy\", \"analiza\", \"qué recomiendas\", usa query_summary, analyze_behavior o financial_advice.",
+            "- Si pregunta \"cómo voy\", \"analiza\", \"qué recomiendas\", usa query_summary, analyze_behavior o financial_advice con análisis real: fugas, top categorías, hábitos, metas y alertas."
+          )
+          api_path.write_text(api)
+
+          # 3) ChatPage: robust debt permissions, update transactions and debt confirmation card
+          p = Path('src/pages/ChatPage.tsx')
+          s = p.read_text()
+          s = s.replace('updateDebt,\n} from', 'updateDebt,\n  updateTransaction,\n} from')
+          if 'updateTarget?: {' not in s:
+            s = s.replace(
+              "  deleteTarget?: {\n    scope?: 'last' | 'last_income' | 'last_expense' | 'amount_match';\n    type?: TransactionType | null;\n    amount?: number | string | null;\n    descriptionHint?: string;\n  };",
+              "  deleteTarget?: {\n    scope?: 'last' | 'last_income' | 'last_expense' | 'amount_match';\n    type?: TransactionType | null;\n    amount?: number | string | null;\n    descriptionHint?: string;\n  };\n  updateTarget?: {\n    scope?: 'last' | 'last_income' | 'last_expense' | 'amount_match';\n    type?: TransactionType | null;\n    amount?: number | string | null;\n    descriptionHint?: string;\n  };\n  transactionUpdate?: {\n    amount?: number | string | null;\n    category?: string;\n    description?: string;\n  };"
+            )
+          if "code === 'permission-denied'" not in s:
+            s = s.replace(
+              "  if (code === 'functions/unauthenticated') {",
+              "  if (code === 'permission-denied' || code === 'firestore/permission-denied') {\n    return {\n      friendly: 'Faltan permisos de Firestore para esta acción. Ya dejé corregidas las reglas; despliega firestore:rules y vuelve a probar.',\n      code,\n      message,\n      details,\n    };\n  }\n\n  if (code === 'functions/unauthenticated') {"
+            )
+          s = s.replace("recentTransactions.slice(0, 10).map", "recentTransactions.slice(0, 50).map")
+          s = s.replace("const recentTransactions = await getTransactions(uid, 20);", "const recentTransactions = await getTransactions(uid, 80);")
+          s = s.replace(
+            '  const debts = await getDebts(uid, 50);\n  const context = buildVercelContext(accounts, currentSummary, recentTransactions) + "\\n\\n" + debtContext(debts);',
+            '  let debts: Debt[] = [];\n  try {\n    debts = await getDebts(uid, 50);\n  } catch (error) {\n    console.warn("Debt context unavailable until Firestore rules are deployed", error);\n  }\n  const context = buildVercelContext(accounts, currentSummary, recentTransactions) + "\\n\\n" + debtContext(debts);'
+          )
+          s = s.replace(
+            "  const debts=(await getDebts(uid,100)).filter(d=>d.status!=='paid');\n  const payment=botAction.debtPayment||{};",
+            "  let debts: Debt[] = [];\n  try {\n    debts = (await getDebts(uid,100)).filter(d=>d.status!=='paid');\n  } catch {\n    return null;\n  }\n  const payment=botAction.debtPayment||{};"
+          )
+          if 'async function findTransactionToUpdate' not in s:
+            s = s.replace(
+              'async function findTransactionToDelete(uid: string, botAction: VercelBotAction, message: string): Promise<Transaction | null> {',
+              'async function findTransactionToUpdate(uid: string, botAction: VercelBotAction, message: string): Promise<Transaction | null> {\n  const adaptedAction = { ...botAction, deleteTarget: botAction.updateTarget || botAction.deleteTarget };\n  return findTransactionToDelete(uid, adaptedAction, message);\n}\n\nasync function findTransactionToDelete(uid: string, botAction: VercelBotAction, message: string): Promise<Transaction | null> {'
+            )
+          if "botAction.intent === 'update_transaction'" not in s:
+            s = s.replace(
+              "\n  if (botAction.intent === 'delete_transaction' || looksLikeDeleteRequest(message)) {",
+              "\n  if (botAction.intent === 'update_transaction') {\n    const txToUpdate = await findTransactionToUpdate(uid, botAction, message);\n    const patch = botAction.transactionUpdate || {};\n    const newAmount = botAmountToNumber(patch.amount);\n\n    if (!txToUpdate) {\n      replyToUser = 'No encontré un movimiento claro para corregir. Dime si es el último gasto, el último ingreso o el valor exacto.';\n    } else if (!newAmount && !patch.category && !patch.description) {\n      replyToUser = 'Entendí que quieres corregir un movimiento, pero falta decir qué cambio hago: valor, categoría o descripción.';\n    } else {\n      await updateTransaction(uid, txToUpdate.id, {\n        amount: newAmount > 0 ? newAmount : txToUpdate.amount,\n        category: patch.category || txToUpdate.category,\n        description: patch.description || txToUpdate.description,\n      } as any);\n      summary = await getLocalMonthlySummary(uid);\n      replyToUser = `Listo, corregí ${txToUpdate.type === 'income' ? 'el ingreso' : 'el gasto'} de ${txToUpdate.description}${newAmount > 0 ? ` a ${formatCOP(newAmount)}` : ''}.`;\n      transactionId = txToUpdate.id;\n    }\n  }\n\n  if (botAction.intent === 'delete_transaction' || looksLikeDeleteRequest(message)) {"
+            )
+          if 'Deuda actualizada' not in s:
+            s = s.replace(
+              "                {msg.summary && (",
+              "                {msg.debtId && (\n                  <div className=\"bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 flex items-center gap-3 animate-in zoom-in-95 duration-500\">\n                    <div className=\"w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center shrink-0\">\n                      <HandCoins className=\"w-5 h-5 text-blue-300\" />\n                    </div>\n                    <div>\n                      <p className=\"text-xs font-bold text-blue-300 uppercase tracking-wider\">Deuda actualizada</p>\n                      <p className=\"text-[10px] text-slate-400\">ID: {msg.debtId.substring(0, 8)}...</p>\n                    </div>\n                  </div>\n                )}\n\n                {msg.summary && ("
+            )
+          p.write_text(s)
+
+          # 4) Dashboard: debt cards, bars and friendlier empty states
+          dpath = Path('src/pages/DashboardPage.tsx')
+          d = dpath.read_text()
+          d = d.replace("import { useAuth } from '../contexts/AuthContext';", "import { useAuth } from '../contexts/AuthContext';\nimport { useDebts } from '../hooks/useDebts';")
+          d = d.replace("TrendingUp, TrendingDown, Wallet, Activity,\n  Tag, Calendar, Loader2, Info", "TrendingUp, TrendingDown, Wallet, Activity,\n  Tag, Calendar, Loader2, Info, HandCoins, AlertTriangle")
+          d = d.replace("  const last7     = useLast7Days(transactions);", "  const last7     = useLast7Days(transactions);\n  const { debts, summary: debtSummary } = useDebts();")
+          if 'const expenseBars' not in d:
+            d = d.replace(
+              "  const topCategory = Object.entries(summary.byCategory).sort((a, b) => b[1] - a[1])[0];",
+              "  const topCategory = Object.entries(summary.byCategory).sort((a, b) => b[1] - a[1])[0];\n  const expenseBars = Object.entries(summary.byCategory).sort((a, b) => b[1] - a[1]).slice(0, 5);\n  const openDebts = debts.filter((debt) => debt.status !== 'paid').slice(0, 4);"
+            )
+          if 'Te deben</span>' not in d:
+            d = d.replace(
+              "        {/* Income/Expense Cards */}",
+              "        {/* Debt cards */}\n        <div className=\"grid grid-cols-2 gap-4\">\n          <div className=\"glass rounded-2xl p-4 border border-green-500/20 bg-green-500/5\">\n            <div className=\"flex items-center justify-between mb-1\">\n              <span className=\"text-xs font-medium text-green-400 uppercase tracking-wider\">Te deben</span>\n              <HandCoins className=\"w-4 h-4 text-green-400\" />\n            </div>\n            <p className=\"text-lg font-bold text-slate-100\">{formatCOP(debtSummary.receivable)}</p>\n          </div>\n          <div className=\"glass rounded-2xl p-4 border border-red-500/20 bg-red-500/5\">\n            <div className=\"flex items-center justify-between mb-1\">\n              <span className=\"text-xs font-medium text-red-400 uppercase tracking-wider\">Debes</span>\n              <AlertTriangle className=\"w-4 h-4 text-red-400\" />\n            </div>\n            <p className=\"text-lg font-bold text-slate-100\">{formatCOP(debtSummary.payable)}</p>\n          </div>\n        </div>\n\n        {/* Income/Expense Cards */}"
+            )
+          if 'Gastos por categoría' not in d:
+            d = d.replace(
+              "        {/* Top Category */}",
+              "        {/* Category bars */}\n        <div className=\"glass rounded-2xl p-5 border border-slate-700/30\">\n          <div className=\"flex items-center gap-2 mb-4\">\n            <Activity className=\"w-4 h-4 text-blue-400\" />\n            <h2 className=\"text-sm font-semibold text-slate-300\">Gastos por categoría</h2>\n          </div>\n          {expenseBars.length > 0 ? (\n            <div className=\"space-y-3\">\n              {expenseBars.map(([category, amount]) => (\n                <div key={category}>\n                  <div className=\"flex items-center justify-between text-xs mb-1\">\n                    <span className=\"text-slate-300 truncate\">{category}</span>\n                    <span className=\"text-slate-400\">{formatCOP(amount)}</span>\n                  </div>\n                  <div className=\"h-2 bg-slate-800 rounded-full overflow-hidden\">\n                    <div className=\"h-full bg-gradient-to-r from-red-500 to-amber-400 rounded-full\" style={{ width: `${summary.totalExpenses > 0 ? Math.min(100, (amount / summary.totalExpenses) * 100) : 0}%` }} />\n                  </div>\n                </div>\n              ))}\n            </div>\n          ) : (\n            <p className=\"text-slate-500 text-xs italic\">Aún no hay categorías. Escribe un gasto en el chat y aquí aparecerá el análisis.</p>\n          )}\n        </div>\n\n        {/* Top Category */}"
+            )
+          if 'Deudas pendientes' not in d:
+            d = d.replace(
+              "        {/* Mini History */}",
+              "        {/* Open debts */}\n        <div className=\"glass rounded-2xl p-5 border border-slate-700/30\">\n          <div className=\"flex items-center gap-2 mb-4\">\n            <HandCoins className=\"w-4 h-4 text-blue-400\" />\n            <h2 className=\"text-sm font-semibold text-slate-300\">Deudas pendientes</h2>\n          </div>\n          {openDebts.length > 0 ? (\n            <ul className=\"space-y-3\">\n              {openDebts.map((debt) => {\n                const remaining = Math.max(0, debt.amountOriginal - debt.amountPaid);\n                return (\n                  <li key={debt.id} className=\"flex items-center justify-between gap-2 border-b border-slate-700/30 pb-2 last:border-0 last:pb-0\">\n                    <div className=\"min-w-0\">\n                      <p className=\"text-sm text-slate-200 truncate font-medium\">{debt.personName}</p>\n                      <p className=\"text-[10px] text-slate-500 uppercase\">{debt.direction === 'receivable' ? 'Te debe' : 'Tú debes'}</p>\n                    </div>\n                    <span className={debt.direction === 'receivable' ? 'text-green-400 text-sm font-bold shrink-0' : 'text-red-400 text-sm font-bold shrink-0'}>{formatCOP(remaining)}</span>\n                  </li>\n                );\n              })}\n            </ul>\n          ) : (\n            <p className=\"text-slate-500 text-xs text-center py-2 italic\">Sin deudas pendientes. Puedes decir: “Juan me debe 50 mil”.</p>\n          )}\n        </div>\n\n        {/* Mini History */}"
+            )
+          d = d.replace(
+            'Puedes preguntarme cosas como "¿Cómo voy este mes?" o "Muéstrame mis gastos en alimentación".',
+            'Puedes preguntarme cosas como "analiza mis fugas", "quién me debe", "corrige ese gasto a 80 mil" o "descargar Excel".'
+          )
+          dpath.write_text(d)
+          PY
+
+      - name: Build to validate
+        run: |
+          npm install
+          npm run build
+
+      - name: Commit patch
+        run: |
+          git config user.name "fundacionsocial-debug"
+          git config user.email "fundacionsocial@gimnasioemocionalmb.com"
+          git add firestore.rules api/deepseek-chat.ts src/pages/ChatPage.tsx src/pages/DashboardPage.tsx
+          git commit -m "Professional finance assistant upgrade" || exit 0
+          git push
