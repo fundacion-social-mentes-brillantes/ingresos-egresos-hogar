@@ -1,4 +1,4 @@
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import type { Account, TransactionType } from '../types';
 
 export interface ImportedTransactionDraft {
@@ -20,6 +20,8 @@ export interface ImportPreviewResult {
   drafts: ImportedTransactionDraft[];
   skipped: string[];
 }
+
+type RowData = Record<string, unknown>;
 
 const INCOME_HEADERS = ['ingreso', 'ingresos', 'entrada', 'entradas', 'abono', 'entró', 'entro', 'recibido', 'debe'];
 const EXPENSE_HEADERS = ['gasto', 'gastos', 'egreso', 'egresos', 'salida', 'salidas', 'pago', 'pagos', 'haber'];
@@ -60,11 +62,19 @@ function parseSignedAmount(value: unknown): number {
   return negative ? -amount : amount;
 }
 
+function excelSerialDateToDate(value: number): Date | null {
+  if (value < 20000 || value > 80000) return null;
+  const utcDays = Math.floor(value - 25569);
+  const utcValue = utcDays * 86400;
+  const dateInfo = new Date(utcValue * 1000);
+  return new Date(dateInfo.getUTCFullYear(), dateInfo.getUTCMonth(), dateInfo.getUTCDate(), 12, 0, 0);
+}
+
 function parseDate(value: unknown): Date {
   if (value instanceof Date) return value;
   if (typeof value === 'number') {
-    const parsed = XLSX.SSF.parse_date_code(value);
-    if (parsed) return new Date(parsed.y, parsed.m - 1, parsed.d, 12, 0, 0);
+    const excelDate = excelSerialDateToDate(value);
+    if (excelDate) return excelDate;
   }
   const text = String(value || '').trim();
   if (!text) return new Date();
@@ -107,17 +117,113 @@ function chooseAccount(accounts: Account[], rawAccount: unknown): Account | null
   return accounts.find((account) => normalize(account.name) === 'efectivo') || accounts[0] || null;
 }
 
-export async function parseExcelFile(file: File, accounts: Account[]): Promise<ImportPreviewResult> {
-  const buffer = await file.arrayBuffer();
-  const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
-  const sheetName = workbook.SheetNames[0];
-  const sheet = workbook.Sheets[sheetName];
-  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
+function cellToValue(value: ExcelJS.CellValue): unknown {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) return value;
+  if (typeof value !== 'object') return value;
 
+  if ('text' in value && value.text) return value.text;
+  if ('result' in value && value.result !== undefined) return value.result;
+  if ('richText' in value && Array.isArray(value.richText)) {
+    return value.richText.map((part) => part.text).join('');
+  }
+  if ('hyperlink' in value && 'text' in value) return value.text;
+
+  return String(value);
+}
+
+function parseCsvLine(line: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    const next = line[index + 1];
+
+    if (char === '"' && inQuotes && next === '"') {
+      current += '"';
+      index += 1;
+    } else if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if ((char === ',' || char === ';') && !inQuotes) {
+      result.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+
+  result.push(current.trim());
+  return result;
+}
+
+async function readCsvRows(file: File): Promise<RowData[]> {
+  const text = await file.text();
+  const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  if (lines.length < 2) return [];
+
+  const headers = parseCsvLine(lines[0]);
+  return lines.slice(1).map((line) => {
+    const values = parseCsvLine(line);
+    return headers.reduce<RowData>((row, header, index) => {
+      row[header || `Columna ${index + 1}`] = values[index] || '';
+      return row;
+    }, {});
+  });
+}
+
+async function readWorkbookRows(file: File): Promise<RowData[]> {
+  const buffer = await file.arrayBuffer();
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) return [];
+
+  let headerRowNumber = 1;
+  let headers: string[] = [];
+
+  worksheet.eachRow((row, rowNumber) => {
+    if (headers.length > 0) return;
+    const values: string[] = [];
+    row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+      values[colNumber - 1] = String(cellToValue(cell.value) || '').trim();
+    });
+    if (values.some(Boolean)) {
+      headerRowNumber = rowNumber;
+      headers = values.map((header, index) => header || `Columna ${index + 1}`);
+    }
+  });
+
+  if (headers.length === 0) return [];
+
+  const rows: RowData[] = [];
+  worksheet.eachRow((row, rowNumber) => {
+    if (rowNumber <= headerRowNumber) return;
+    const record = headers.reduce<RowData>((acc, header) => {
+      acc[header] = '';
+      return acc;
+    }, {});
+    let hasValue = false;
+
+    row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+      const header = headers[colNumber - 1] || `Columna ${colNumber}`;
+      const value = cellToValue(cell.value);
+      if (String(value || '').trim()) hasValue = true;
+      record[header] = value;
+    });
+
+    if (hasValue) rows.push(record);
+  });
+
+  return rows;
+}
+
+function buildDraftsFromRows(rows: RowData[], accounts: Account[]): ImportPreviewResult {
   const drafts: ImportedTransactionDraft[] = [];
   const skipped: string[] = [];
 
-  rows.forEach((row, index) => {
+  rows.forEach((row: RowData, index: number) => {
     const headers = Object.keys(row);
     const dateHeader = findHeader(headers, DATE_HEADERS);
     const descriptionHeader = findHeader(headers, DESCRIPTION_HEADERS);
@@ -174,4 +280,10 @@ export async function parseExcelFile(file: File, accounts: Account[]): Promise<I
   });
 
   return { rowsRead: rows.length, drafts, skipped: skipped.slice(0, 20) };
+}
+
+export async function parseExcelFile(file: File, accounts: Account[]): Promise<ImportPreviewResult> {
+  const isCsv = /\.csv$/i.test(file.name);
+  const rows = isCsv ? await readCsvRows(file) : await readWorkbookRows(file);
+  return buildDraftsFromRows(rows, accounts);
 }
