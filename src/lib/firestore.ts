@@ -30,6 +30,12 @@ const accRef = (uid: string, id: string) => doc(db, 'users', uid, 'accounts', id
 const chatCol = (uid: string) => collection(db, 'users', uid, 'chatMessages');
 const settRef = (uid: string) => doc(db, 'users', uid, 'settings', 'app');
 
+function cleanUndefinedFields<T extends Record<string, unknown>>(data: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(data).filter(([, value]) => value !== undefined)
+  ) as Partial<T>;
+}
+
 function toDate(value: unknown): Date {
   if (value instanceof Date) return value;
   if (value && typeof value === 'object' && 'toDate' in value && typeof (value as { toDate: () => Date }).toDate === 'function') {
@@ -185,7 +191,7 @@ export async function getChatMessages(uid: string, limitCount = 50): Promise<Cha
 }
 
 export async function addChatMessage(uid: string, data: Omit<ChatMessage, 'id' | 'createdAt'>) {
-  return addDoc(chatCol(uid), { ...data, createdAt: serverTimestamp() });
+  return addDoc(chatCol(uid), cleanUndefinedFields({ ...data, createdAt: serverTimestamp() }));
 }
 
 // -- Settings ----------------------------------------------------------------
