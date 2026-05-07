@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useTransactions } from '../hooks/useTransactions';
 import { deleteTransaction } from '../lib/firestore';
+import { exportTransactionsToExcel } from '../lib/exportExcel';
 import { useAuth } from '../contexts/AuthContext';
 import { formatCOP } from '../types';
 import { format } from 'date-fns';
@@ -8,17 +9,15 @@ import { es } from 'date-fns/locale';
 import { 
   ArrowUpRight, 
   ArrowDownLeft, 
-  Filter, 
   Trash2, 
   Search,
   Bot,
   User,
-  MoreVertical,
   Loader2,
-  Calendar
+  Download
 } from 'lucide-react';
 import { Button } from '../components/ui/Button';
-import { Input, Select } from '../components/ui/Input';
+import { Input } from '../components/ui/Input';
 import clsx from 'clsx';
 
 export function TransactionsPage() {
@@ -46,6 +45,11 @@ export function TransactionsPage() {
     }
   };
 
+  const handleExport = () => {
+    const base = filterType === 'all' ? transactions : filtered;
+    exportTransactionsToExcel(base, 'finanzas-organizadas-ingresos-egresos.xlsx');
+  };
+
   if (loading && transactions.length === 0) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -62,7 +66,7 @@ export function TransactionsPage() {
           <p className="text-slate-400 text-sm">Historial completo de tus finanzas</p>
         </div>
         
-        <div className="flex items-center gap-2">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
           <Input 
             placeholder="Buscar..." 
             value={search}
@@ -70,10 +74,18 @@ export function TransactionsPage() {
             icon={<Search className="w-4 h-4" />}
             className="w-full md:w-64"
           />
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleExport}
+            disabled={transactions.length === 0}
+            icon={<Download className="w-4 h-4" />}
+          >
+            Descargar Excel
+          </Button>
         </div>
       </div>
 
-      {/* Filters */}
       <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-hide">
         <Button 
           variant={filterType === 'all' ? 'primary' : 'ghost'} 
@@ -100,7 +112,6 @@ export function TransactionsPage() {
         </Button>
       </div>
 
-      {/* Table/List */}
       <div className="glass rounded-2xl overflow-hidden border border-slate-700/30">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
@@ -137,7 +148,7 @@ export function TransactionsPage() {
                             <Bot className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                           </span>
                         ) : (
-                          <span title="Manual">
+                          <span title="Manual/importado">
                             <User className="w-3.5 h-3.5 text-slate-500 shrink-0" />
                           </span>
                         )}
