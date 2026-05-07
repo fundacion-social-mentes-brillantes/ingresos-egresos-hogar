@@ -5,19 +5,24 @@ import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestor
 import {
   addAccount,
   addChatMessage,
+  addDebt,
   addTransaction,
   deleteTransaction,
   getAccounts,
+  getDebts,
   getTransactions,
   getTransactionsByRange,
+  registerDebtPayment,
+  updateDebt,
 } from '../lib/firestore';
-import type { Account, ChatMessage, FinancialSummary, Transaction, TransactionType } from '../types';
+import type { Account, ChatMessage, Debt, DebtDirection, FinancialSummary, Transaction, TransactionType } from '../types';
 import { DEFAULT_ACCOUNTS, formatCOP } from '../types';
 import {
   AlertCircle,
   Bot,
   Camera,
   CheckCircle2,
+  HandCoins,
   Loader2,
   PieChart,
   RefreshCw,
@@ -50,6 +55,21 @@ interface VercelBotAction {
     accountName?: string;
     description?: string;
     date?: string;
+  };
+  debt?: {
+    direction?: DebtDirection;
+    personName?: string;
+    amount?: number | string;
+    currency?: string;
+    description?: string;
+    notes?: string;
+    dueDate?: string | null;
+  };
+  debtPayment?: {
+    direction?: DebtDirection | null;
+    personName?: string;
+    amount?: number | string | null;
+    scope?: 'last' | 'person_match' | 'amount_match';
   };
   query?: {
     range?: 'today' | 'last_3_days' | 'last_7_days' | 'this_month' | 'custom';
@@ -298,6 +318,33 @@ async function findTransactionToDelete(uid: string, botAction: VercelBotAction, 
   return transactions[0] || null;
 }
 
+
+function debtRemaining(debt: Debt): number { return Math.max(0, debt.amountOriginal - debt.amountPaid); }
+function botOptionalDate(value?: string | null): Date | null {
+  if (!value) return null;
+  if (value === 'today') return new Date();
+  if (value === 'tomorrow') { const d = new Date(); d.setDate(d.getDate()+1); return d; }
+  const parsed = new Date(`${value}T12:00:00-05:00`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+function debtContext(debts: Debt[]): string {
+  const open=debts.filter(d=>d.status!=='paid');
+  const rec=open.filter(d=>d.direction==='receivable').reduce((a,d)=>a+debtRemaining(d),0);
+  const pay=open.filter(d=>d.direction==='payable').reduce((a,d)=>a+debtRemaining(d),0);
+  const list=open.slice(0,10).map((d,i)=>`${i+1}. ${d.direction==='receivable'?'me deben':'yo debo'} ${formatCOP(debtRemaining(d))} | ${d.personName} | ${d.description}`).join('\n');
+  return `Deudas abiertas: ${open.length}\nMe deben: ${formatCOP(rec)}\nYo debo: ${formatCOP(pay)}\n${list || 'sin deudas abiertas'}`;
+}
+function personMatch(debt: Debt, name?: string): boolean {
+  if (!name) return true; const a=normalizeText(debt.personName), b=normalizeText(name); return a.includes(b)||b.includes(a);
+}
+async function findDebtForBot(uid: string, botAction: VercelBotAction): Promise<Debt | null> {
+  const debts=(await getDebts(uid,100)).filter(d=>d.status!=='paid');
+  const payment=botAction.debtPayment||{};
+  const direction=payment.direction||null;
+  const found=debts.find(d=>(direction?d.direction===direction:true)&&personMatch(d,payment.personName));
+  return found || debts[0] || null;
+}
+
 async function runVercelDeepSeekChat(
   uid: string,
   message: string,
@@ -309,7 +356,8 @@ async function runVercelDeepSeekChat(
   const accounts = await ensureLocalAccounts(uid);
   const currentSummary = await getLocalMonthlySummary(uid);
   const recentTransactions = await getTransactions(uid, 20);
-  const context = buildVercelContext(accounts, currentSummary, recentTransactions);
+  const debts = await getDebts(uid, 50);
+  const context = buildVercelContext(accounts, currentSummary, recentTransactions) + "\n\n" + debtContext(debts);
 
   const botAction = await callVercelDeepSeek({
     message,
@@ -321,6 +369,7 @@ async function runVercelDeepSeekChat(
 
   let replyToUser = botAction.replyToUser;
   let transactionId: string | undefined;
+  let debtId: string | undefined;
   let summary: FinancialSummary | undefined;
   const suggestedNextQuestion = botAction.suggestedNextQuestion || '';
 
@@ -353,6 +402,51 @@ async function runVercelDeepSeekChat(
     }
   }
 
+
+  if (botAction.intent === 'create_debt' && botAction.debt && (botAction.confidence ?? 0) >= 0.65) {
+    const d = botAction.debt;
+    const amount = botAmountToNumber(d.amount);
+    if (!d.direction || !d.personName || amount <= 0) {
+      replyToUser = 'Entendí que quieres guardar una deuda, pero falta quién debe o el valor exacto.';
+    } else {
+      const created = await addDebt(uid, {
+        direction: d.direction,
+        personName: d.personName.trim(),
+        amountOriginal: amount,
+        amountPaid: 0,
+        currency: 'COP',
+        description: d.description || (d.direction === 'receivable' ? 'Plata prestada' : 'Deuda por pagar'),
+        notes: d.notes || undefined,
+        dueDate: botOptionalDate(d.dueDate),
+        status: 'open',
+        source: 'bot',
+        confidence: botAction.confidence ?? 0.95,
+        closedAt: null,
+      });
+      debtId = created.id;
+      replyToUser = d.direction === 'receivable' ? `Listo, guardé que ${d.personName} te debe ${formatCOP(amount)}.` : `Listo, guardé que debes ${formatCOP(amount)} a ${d.personName}.`;
+    }
+  }
+
+  if (botAction.intent === 'register_debt_payment' || botAction.intent === 'close_debt') {
+    const debt = await findDebtForBot(uid, botAction);
+    if (!debt) {
+      replyToUser = 'No encontré una deuda abierta clara. Dime el nombre de la persona o entidad.';
+    } else if (botAction.intent === 'close_debt') {
+      await updateDebt(uid, debt.id, { amountPaid: debt.amountOriginal, status: 'paid', closedAt: new Date() });
+      debtId = debt.id; replyToUser = `Listo, marqué como pagada la deuda con ${debt.personName}.`;
+    } else {
+      const amount = botAmountToNumber(botAction.debtPayment?.amount ?? 0);
+      if (amount <= 0) replyToUser = 'Dime cuánto abonaron o cuánto pagaste.';
+      else { await registerDebtPayment(uid, debt.id, amount); debtId = debt.id; replyToUser = `Listo, registré el abono de ${formatCOP(amount)} en la deuda con ${debt.personName}.`; }
+    }
+  }
+
+  if (botAction.intent === 'query_debts') {
+    const debts = (await getDebts(uid, 100)).filter(d=>d.status!=='paid');
+    replyToUser = debtContext(debts);
+  }
+
   if (botAction.intent === 'delete_transaction' || looksLikeDeleteRequest(message)) {
     const txToDelete = await findTransactionToDelete(uid, botAction, message);
 
@@ -379,6 +473,7 @@ async function runVercelDeepSeekChat(
     emotionalTone: botAction.emotionalTone || 'encouraging',
     suggestedNextQuestion,
     transactionId,
+    debtId,
     summary,
     intent: botAction.intent,
   } as any);
@@ -519,7 +614,7 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
             </div>
             <h3 className="text-slate-200 font-semibold">¡Hola! Soy tu asistente de Ingresos y Egresos</h3>
             <p className="text-slate-500 text-sm mt-2 max-w-xs">
-              Escríbeme normal: registro, borro, consulto y razono contigo sobre tus finanzas.
+              Escríbeme normal: registro ingresos, gastos, deudas, plata prestada, abonos y consultas.
             </p>
           </div>
         )}
@@ -657,7 +752,7 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
                   handleSend();
                 }
               }}
-              placeholder={selectedImage ? 'Añade un comentario o envía...' : "Escríbeme normal: registra, borra, consulta o razona conmigo..."}
+              placeholder={selectedImage ? 'Añade un comentario o envía...' : "Ej: Juan me debe 50 mil, debo 120 mil de luz, Ana me abonó 20 mil..."}
               disabled={loading}
               rows={1}
               className="w-full bg-slate-900/60 border border-slate-700/50 text-slate-100 text-sm px-4 py-3 rounded-2xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 placeholder:text-slate-600 transition-all shadow-inner resize-none min-h-[48px] max-h-32 py-[13px]"
