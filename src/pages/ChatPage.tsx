@@ -99,8 +99,8 @@ function normalizeAmount(value: string): number {
 
 function inferTransactionType(message: string): TransactionType | null {
   const text = normalizeText(message);
-  const incomeWords = ['me entro', 'recibi', 'me pagaron', 'cobre', 'me consignaron', 'me depositaron', 'vendi', 'ingrese'];
-  const expenseWords = ['me gaste', 'gaste', 'compre', 'pague', 'almorce', 'recargue', 'tanquie', 'me toco pagar'];
+  const incomeWords = ['me entro', 'entro plata', 'entraron', 'recibi', 'recibo', 'me pagaron', 'cobre', 'cobro', 'me consignaron', 'me depositaron', 'vendi', 'venta', 'ingrese', 'ingresa', 'ingreso', 'ingresos', 'tengo en ingresos', 'agrega ingreso', 'registrar ingreso', 'sueldo', 'salario', 'quincena'];
+  const expenseWords = ['me gaste', 'gaste', 'gasto', 'gastos', 'egreso', 'egresos', 'compre', 'compra', 'pague', 'almorce', 'recargue', 'tanquie', 'me toco pagar'];
 
   if (incomeWords.some((word) => text.includes(word))) return 'income';
   if (expenseWords.some((word) => text.includes(word))) return 'expense';
@@ -110,7 +110,7 @@ function inferTransactionType(message: string): TransactionType | null {
 function inferDescription(message: string): string {
   const description = message
     .replace(/\$?\s*\d+(?:[.,]\d+)?\s*(mil|lucas?|k|millones?|millon)?/gi, '')
-    .replace(/\b(me gaste|gast[eé]|compre|compr[eé]|pague|pagu[eé]|me pagaron|recibi|recib[ií]|cobre|cobr[eé]|en|por|con|de)\b/gi, ' ')
+    .replace(/\b(me gaste|gast[eé]|gasto|gastos|egreso|egresos|compre|compr[eé]|pague|pagu[eé]|me pagaron|recibi|recib[ií]|recibo|cobre|cobr[eé]|ingresa|ingrese|ingreso|ingresos|entra|entr[oó]|entraron|agrega|registrar|tengo|en|por|con|de)\b/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -197,7 +197,7 @@ async function runLocalChatFallback(uid: string, message: string, hasImage: bool
     replyToUser = 'No pude leer la imagen automáticamente en este momento. Escríbeme el valor y qué compraste o pagaste, y lo registro por ti.';
     suggestedNextQuestion = '¿Cuánto fue y en qué lo pagaste?';
   } else if (/^(hola|holi|buenas|buenos dias|buenas tardes|buenas noches|hey)\b/.test(text)) {
-    replyToUser = '¡Hola! Estoy listo para ayudarte con tus ingresos y gastos. Puedes escribirme algo como: “me gasté 10 mil en un helado” o preguntarme “¿cómo voy este mes?”.';
+    replyToUser = '¡Hola! Estoy listo. Puedes escribirme “ingresa 900 mil”, “me gasté 10 mil en un helado” o preguntarme “¿cómo voy este mes?”.';
     suggestedNextQuestion = '¿Quieres registrar un gasto o revisar tu resumen del mes?';
   } else if (text.includes('como voy') || text.includes('cuanto gaste') || text.includes('cuanto he gastado') || text.includes('resumen') || text.includes('balance')) {
     intent = 'query_summary';
@@ -225,20 +225,25 @@ async function runLocalChatFallback(uid: string, message: string, hasImage: bool
           date: new Date(),
           rawText: message,
           source: 'bot',
-          confidence: 0.8,
+          confidence: 0.9,
         });
 
         intent = 'create_transaction';
         transactionId = created.id;
+        summary = await getLocalMonthlySummary(uid);
         replyToUser = type === 'income'
-          ? `Listo, registré ese ingreso por ${formatCOP(amount)}.`
-          : `Listo, registré ese gasto por ${formatCOP(amount)}.`;
+          ? `Listo, registré ese ingreso por ${formatCOP(amount)}. Balance del mes: ${formatCOP(summary.balance)}.`
+          : `Listo, registré ese gasto por ${formatCOP(amount)}. Balance del mes: ${formatCOP(summary.balance)}.`;
         suggestedNextQuestion = '¿Quieres ver el resumen del mes?';
       } else {
         intent = 'clarify';
         replyToUser = 'Entendí el movimiento, pero no encontré una cuenta disponible para guardarlo. Revisa tus cuentas e inténtalo de nuevo.';
         suggestedNextQuestion = '¿Quieres revisar tus cuentas?';
       }
+    } else if (amount > 0) {
+      intent = 'clarify';
+      replyToUser = `Veo ${formatCOP(amount)}, pero necesito saber si es ingreso o gasto. Escríbeme: “ingresa ${formatCOP(amount)}” o “gasté ${formatCOP(amount)}”.`;
+      suggestedNextQuestion = '';
     }
   }
 
@@ -596,7 +601,7 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
                   handleSend();
                 }
               }}
-              placeholder={selectedImage ? "Añade un comentario o envía..." : "Ej: 'Me gasté 15k en un café'..."}
+              placeholder={selectedImage ? "Añade un comentario o envía..." : "Ej: 'Ingresa 900 mil' o 'Me gasté 15k en café'..."}
               disabled={loading}
               rows={1}
               className="w-full bg-slate-900/60 border border-slate-700/50 text-slate-100 text-sm px-4 py-3 rounded-2xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 placeholder:text-slate-600 transition-all shadow-inner resize-none min-h-[48px] max-h-32 py-[13px]"
