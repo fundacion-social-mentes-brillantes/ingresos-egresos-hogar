@@ -7,6 +7,7 @@ import {
   Settings,
   LogOut,
   TrendingUp,
+  FileSpreadsheet,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -14,7 +15,8 @@ const navItems = [
   { to: '/dashboard',     label: 'Inicio',        icon: LayoutDashboard  },
   { to: '/chat',          label: 'Chat',           icon: MessageSquare    },
   { to: '/transactions',  label: 'Movimientos',    icon: ArrowLeftRight   },
-  { to: '/settings',      label: 'Configuración',  icon: Settings         },
+  { to: '/import',        label: 'Importar',       icon: FileSpreadsheet  },
+  { to: '/settings',      label: 'Config.',        icon: Settings         },
 ];
 
 export function Sidebar() {
@@ -28,7 +30,6 @@ export function Sidebar() {
 
   return (
     <aside className="fixed left-0 top-0 h-screen w-64 glass border-r border-slate-700/40 flex flex-col z-40 hidden md:flex">
-      {/* Logo */}
       <div className="p-6 border-b border-slate-700/40">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/30">
@@ -41,7 +42,6 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* Nav */}
       <nav className="flex-1 p-4 space-y-1">
         {navItems.map(({ to, label, icon: Icon }) => (
           <NavLink
@@ -62,7 +62,6 @@ export function Sidebar() {
         ))}
       </nav>
 
-      {/* User + Logout */}
       <div className="p-4 border-t border-slate-700/40">
         <div className="flex items-center gap-3 px-2 mb-3">
           <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-sm font-bold text-white">
@@ -85,17 +84,16 @@ export function Sidebar() {
   );
 }
 
-// Mobile bottom nav
 export function BottomNav() {
   return (
-    <nav className="fixed bottom-0 left-0 right-0 glass border-t border-slate-700/40 flex md:hidden z-40">
+    <nav className="fixed bottom-0 left-0 right-0 bg-slate-950/90 backdrop-blur-xl border-t border-slate-700/50 flex md:hidden z-50 pb-[env(safe-area-inset-bottom)] shadow-2xl">
       {navItems.map(({ to, label, icon: Icon }) => (
         <NavLink
           key={to}
           to={to}
           className={({ isActive }) =>
             clsx(
-              'flex-1 flex flex-col items-center gap-1 py-3 text-xs transition-all duration-200',
+              'flex-1 flex h-16 flex-col items-center justify-center gap-1 py-2 text-[11px] font-medium transition-all duration-200',
               isActive ? 'text-blue-400' : 'text-slate-500'
             )
           }
