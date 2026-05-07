@@ -1,0 +1,39 @@
+name: Patch DeepSeek V4 Pro
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/patch-deepseek-v4-pro.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Patch Firebase function to use DeepSeek V4 Pro
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('functions/src/index.ts')
+          text = path.read_text()
+          old = """const response = await axios.post(\n      'https://api.deepseek.com/v1/chat/completions',\n      {\n        model: 'deepseek-chat',\n        messages,\n        response_format: { type: 'json_object' },\n        temperature: 0.35,\n      },"""
+          new = """const response = await axios.post(\n      'https://api.deepseek.com/chat/completions',\n      {\n        model: 'deepseek-v4-pro',\n        messages,\n        response_format: { type: 'json_object' },\n        thinking: { type: 'enabled' },\n        reasoning_effort: 'high',\n        temperature: 0.35,\n        max_tokens: 8192,\n      },"""
+          if old not in text:
+              raise SystemExit('Expected DeepSeek block not found')
+          path.write_text(text.replace(old, new))
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "fundacionsocial-debug"
+          git config user.email "fundacionsocial@gimnasioemocionalmb.com"
+          git add functions/src/index.ts
+          git commit -m "Use DeepSeek V4 Pro in financial assistant" || exit 0
+          git push
