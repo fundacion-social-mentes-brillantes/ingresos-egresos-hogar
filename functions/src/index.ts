@@ -481,12 +481,15 @@ FECHA ACTUAL (Colombia): ${format(new Date(), 'yyyy-MM-dd HH:mm')}
 
   try {
     const response = await axios.post(
-      'https://api.deepseek.com/v1/chat/completions',
+      'https://api.deepseek.com/chat/completions',
       {
-        model: 'deepseek-chat',
+        model: 'deepseek-v4-pro',
         messages,
         response_format: { type: 'json_object' },
+        thinking: { type: 'enabled' },
+        reasoning_effort: 'high',
         temperature: 0.35,
+        max_tokens: 8192,
       },
       {
         headers: {
