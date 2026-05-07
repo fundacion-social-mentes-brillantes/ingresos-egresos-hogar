@@ -1,0 +1,50 @@
+name: Disable Chat Fallbacks
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/disable-chat-fallbacks.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Disable frontend and backend fallbacks
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          chat_path = Path('src/pages/ChatPage.tsx')
+          chat = chat_path.read_text()
+          old_should = """function shouldUseLocalFallback(error: any): boolean {\n  const code = error?.code || '';\n  return code !== 'functions/unauthenticated' && code !== 'functions/invalid-argument';\n}"""
+          new_should = """function shouldUseLocalFallback(_error: any): boolean {\n  return false;\n}"""
+          if old_should not in chat:
+              raise SystemExit('Frontend fallback switch block not found')
+          chat = chat.replace(old_should, new_should)
+          chat_path.write_text(chat)
+
+          fn_path = Path('functions/src/index.ts')
+          fn = fn_path.read_text()
+          old_backend = """    } catch (error: any) {\n      console.error('AI fallback activated:', error.message || error);\n      botAction = fallbackBotAction(message, hasImage);\n    }"""
+          new_backend = """    } catch (error: any) {\n      console.error('DeepSeek V4 Pro failed; fallback disabled:', error.response?.data || error.message || error);\n      void fallbackBotAction;\n      throw new HttpsError(\n        'internal',\n        'DeepSeek V4 Pro no respondió correctamente. No se usó fallback local.',\n        { source: 'deepseek-v4-pro', fallback: 'disabled' }\n      );\n    }"""
+          if old_backend not in fn:
+              raise SystemExit('Backend fallback block not found')
+          fn = fn.replace(old_backend, new_backend)
+          fn_path.write_text(fn)
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "fundacionsocial-debug"
+          git config user.email "fundacionsocial@gimnasioemocionalmb.com"
+          git add src/pages/ChatPage.tsx functions/src/index.ts
+          git commit -m "Disable chat fallbacks and require DeepSeek V4 Pro" || exit 0
+          git push
