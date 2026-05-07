@@ -1,0 +1,51 @@
+name: Debt Chat Minimal
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/debt-chat-minimal.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Patch chat imports and debt actions
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/pages/ChatPage.tsx')
+          s=p.read_text()
+          s=s.replace('addChatMessage,\n  addTransaction,','addChatMessage,\n  addDebt,\n  addTransaction,')
+          s=s.replace('getAccounts,\n  getTransactions,','getAccounts,\n  getDebts,\n  getTransactions,')
+          s=s.replace('getTransactionsByRange,\n} from', 'getTransactionsByRange,\n  registerDebtPayment,\n  updateDebt,\n} from')
+          s=s.replace('import type { Account, ChatMessage, FinancialSummary, Transaction, TransactionType }', 'import type { Account, ChatMessage, Debt, DebtDirection, FinancialSummary, Transaction, TransactionType }')
+          s=s.replace('CheckCircle2,\n  Loader2,', 'CheckCircle2,\n  HandCoins,\n  Loader2,')
+          if 'debt?: {' not in s:
+            s=s.replace('''  transaction?: {\n    type?: TransactionType;\n    amount?: number | string;\n    currency?: string;\n    category?: string;\n    accountName?: string;\n    description?: string;\n    date?: string;\n  };''','''  transaction?: {\n    type?: TransactionType;\n    amount?: number | string;\n    currency?: string;\n    category?: string;\n    accountName?: string;\n    description?: string;\n    date?: string;\n  };\n  debt?: {\n    direction?: DebtDirection;\n    personName?: string;\n    amount?: number | string;\n    currency?: string;\n    description?: string;\n    notes?: string;\n    dueDate?: string | null;\n  };\n  debtPayment?: {\n    direction?: DebtDirection | null;\n    personName?: string;\n    amount?: number | string | null;\n    scope?: 'last' | 'person_match' | 'amount_match';\n  };''')
+          insert='''\nfunction debtRemaining(debt: Debt): number { return Math.max(0, debt.amountOriginal - debt.amountPaid); }\nfunction botOptionalDate(value?: string | null): Date | null {\n  if (!value) return null;\n  if (value === 'today') return new Date();\n  if (value === 'tomorrow') { const d = new Date(); d.setDate(d.getDate()+1); return d; }\n  const parsed = new Date(`${value}T12:00:00-05:00`);\n  return Number.isNaN(parsed.getTime()) ? null : parsed;\n}\nfunction debtContext(debts: Debt[]): string {\n  const open=debts.filter(d=>d.status!=='paid');\n  const rec=open.filter(d=>d.direction==='receivable').reduce((a,d)=>a+debtRemaining(d),0);\n  const pay=open.filter(d=>d.direction==='payable').reduce((a,d)=>a+debtRemaining(d),0);\n  const list=open.slice(0,10).map((d,i)=>`${i+1}. ${d.direction==='receivable'?'me deben':'yo debo'} ${formatCOP(debtRemaining(d))} | ${d.personName} | ${d.description}`).join('\\n');\n  return `Deudas abiertas: ${open.length}\\nMe deben: ${formatCOP(rec)}\\nYo debo: ${formatCOP(pay)}\\n${list || 'sin deudas abiertas'}`;\n}\nfunction personMatch(debt: Debt, name?: string): boolean {\n  if (!name) return true; const a=normalizeText(debt.personName), b=normalizeText(name); return a.includes(b)||b.includes(a);\n}\nasync function findDebtForBot(uid: string, botAction: VercelBotAction): Promise<Debt | null> {\n  const debts=(await getDebts(uid,100)).filter(d=>d.status!=='paid');\n  const payment=botAction.debtPayment||{};\n  const direction=payment.direction||null;\n  const found=debts.find(d=>(direction?d.direction===direction:true)&&personMatch(d,payment.personName));\n  return found || debts[0] || null;\n}\n'''
+          if 'function debtRemaining' not in s:
+            s=s.replace('async function runVercelDeepSeekChat(', insert+'\nasync function runVercelDeepSeekChat(')
+          s=s.replace('const recentTransactions = await getTransactions(uid, 20);\n  const context = buildVercelContext(accounts, currentSummary, recentTransactions);','const recentTransactions = await getTransactions(uid, 20);\n  const debts = await getDebts(uid, 50);\n  const context = buildVercelContext(accounts, currentSummary, recentTransactions) + "\\n\\n" + debtContext(debts);')
+          s=s.replace('let transactionId: string | undefined;\n  let summary:', 'let transactionId: string | undefined;\n  let debtId: string | undefined;\n  let summary:')
+          block='''\n  if (botAction.intent === 'create_debt' && botAction.debt && (botAction.confidence ?? 0) >= 0.65) {\n    const d = botAction.debt;\n    const amount = botAmountToNumber(d.amount);\n    if (!d.direction || !d.personName || amount <= 0) {\n      replyToUser = 'Entendí que quieres guardar una deuda, pero falta quién debe o el valor exacto.';\n    } else {\n      const created = await addDebt(uid, {\n        direction: d.direction,\n        personName: d.personName.trim(),\n        amountOriginal: amount,\n        amountPaid: 0,\n        currency: 'COP',\n        description: d.description || (d.direction === 'receivable' ? 'Plata prestada' : 'Deuda por pagar'),\n        notes: d.notes || undefined,\n        dueDate: botOptionalDate(d.dueDate),\n        status: 'open',\n        source: 'bot',\n        confidence: botAction.confidence ?? 0.95,\n        closedAt: null,\n      });\n      debtId = created.id;\n      replyToUser = d.direction === 'receivable' ? `Listo, guardé que ${d.personName} te debe ${formatCOP(amount)}.` : `Listo, guardé que debes ${formatCOP(amount)} a ${d.personName}.`;\n    }\n  }\n\n  if (botAction.intent === 'register_debt_payment' || botAction.intent === 'close_debt') {\n    const debt = await findDebtForBot(uid, botAction);\n    if (!debt) {\n      replyToUser = 'No encontré una deuda abierta clara. Dime el nombre de la persona o entidad.';\n    } else if (botAction.intent === 'close_debt') {\n      await updateDebt(uid, debt.id, { amountPaid: debt.amountOriginal, status: 'paid', closedAt: new Date() });\n      debtId = debt.id; replyToUser = `Listo, marqué como pagada la deuda con ${debt.personName}.`;\n    } else {\n      const amount = botAmountToNumber(botAction.debtPayment?.amount ?? 0);\n      if (amount <= 0) replyToUser = 'Dime cuánto abonaron o cuánto pagaste.';\n      else { await registerDebtPayment(uid, debt.id, amount); debtId = debt.id; replyToUser = `Listo, registré el abono de ${formatCOP(amount)} en la deuda con ${debt.personName}.`; }\n    }\n  }\n\n  if (botAction.intent === 'query_debts') {\n    const debts = (await getDebts(uid, 100)).filter(d=>d.status!=='paid');\n    replyToUser = debtContext(debts);\n  }\n'''
+          if "botAction.intent === 'create_debt'" not in s:
+            s=s.replace("  if (botAction.intent === 'delete_transaction'", block+"\n  if (botAction.intent === 'delete_transaction'")
+          s=s.replace('transactionId,\n    summary,', 'transactionId,\n    debtId,\n    summary,')
+          s=s.replace('Escríbeme normal: registro, borro, consulto y razono contigo sobre tus finanzas.', 'Escríbeme normal: registro ingresos, gastos, deudas, plata prestada, abonos y consultas.')
+          s=s.replace('Escríbeme normal: registra, borra, consulta o razona conmigo...', 'Ej: Juan me debe 50 mil, debo 120 mil de luz, Ana me abonó 20 mil...')
+          p.write_text(s)
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "fundacionsocial-debug"
+          git config user.email "fundacionsocial@gimnasioemocionalmb.com"
+          git add src/pages/ChatPage.tsx
+          git commit -m "Connect chat bot to debts" || exit 0
+          git push
