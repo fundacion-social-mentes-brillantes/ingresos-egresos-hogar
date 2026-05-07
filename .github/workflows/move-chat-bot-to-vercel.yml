@@ -1,0 +1,358 @@
+name: Move Chat Bot To Vercel
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/move-chat-bot-to-vercel.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Move DeepSeek chat call to Vercel API route
+        run: |
+          mkdir -p api
+          cat > api/deepseek-chat.ts <<'TS'
+          function extractJsonObject(content: string): string {
+            const trimmed = String(content || '').trim();
+            const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+            if (fenced?.[1]) return fenced[1].trim();
+
+            const start = trimmed.indexOf('{');
+            const end = trimmed.lastIndexOf('}');
+            if (start >= 0 && end > start) return trimmed.slice(start, end + 1);
+            return trimmed;
+          }
+
+          function safeHistory(history: any[]): any[] {
+            if (!Array.isArray(history)) return [];
+            return history.slice(-12).map((m) => ({
+              role: m?.sender === 'bot' ? 'assistant' : 'user',
+              content: String(m?.text || '').slice(0, 1200),
+            }));
+          }
+
+          export default async function handler(req: any, res: any) {
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+            res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+            if (req.method === 'OPTIONS') return res.status(204).end();
+            if (req.method !== 'POST') return res.status(405).json({ error: 'Método no permitido.' });
+
+            const apiKey = process.env.DEEPSEEK_API_KEY;
+            if (!apiKey) {
+              return res.status(500).json({
+                error: 'DEEPSEEK_API_KEY no está configurada en Vercel para este proyecto.',
+                source: 'vercel-env',
+              });
+            }
+
+            const { message, imageBase64, imageMimeType, context, chatHistory } = req.body || {};
+            if (!message || typeof message !== 'string') {
+              return res.status(400).json({ error: 'El mensaje es obligatorio.' });
+            }
+
+            const hasImage = Boolean(imageBase64 && imageMimeType);
+            const systemPrompt = `
+          Eres el asistente financiero principal de "Ingresos y Egresos Hogar".
+          Funcionas con DeepSeek V4 Pro desde Vercel. No eres un fallback ni un bot de comandos.
+
+          Personalidad:
+          - Hablas en español colombiano, natural, cercano, inteligente y directo.
+          - Puedes dialogar como asesor financiero personal: preguntar, explicar, interpretar, retar con respeto y proponer acciones.
+          - Entiendes errores de escritura, frases incompletas, modismos y contexto.
+          - El usuario quiere sentir que habla con un asistente financiero real, no con un formulario.
+
+          Tareas:
+          1. Conversar naturalmente sobre dinero, hábitos, deudas, metas, ahorro, inversión y organización del hogar.
+          2. Registrar ingresos o gastos cuando el usuario lo diga claro.
+          3. Para consultas de cifras reales, devolver query_summary para que la app calcule con datos de Firestore.
+          4. Si hay monto y tipo claro, crea la transacción sin pedir confirmación.
+          5. Solo pregunta si falta un dato esencial o si podrías guardar mal el movimiento.
+
+          Formato obligatorio:
+          Responde siempre SOLO como JSON válido, sin markdown, sin texto adicional.
+          Estructura:
+          {
+            "intent": "create_transaction" | "query_summary" | "analyze_behavior" | "financial_advice" | "update_transaction" | "delete_transaction" | "clarify" | "conversation_only",
+            "replyToUser": "respuesta natural para el usuario",
+            "confidence": 0.0,
+            "emotionalTone": "calm" | "encouraging" | "alert" | "neutral",
+            "suggestedNextQuestion": "opcional"
+          }
+
+          Si intent es create_transaction, incluye:
+          "shouldCreateTransaction": true,
+          "transaction": {
+            "type": "income" | "expense",
+            "amount": número,
+            "currency": "COP",
+            "category": "Alimentación" | "Transporte" | "Hogar" | "Salud" | "Educación" | "Entretenimiento" | "Ropa" | "Tecnología" | "Ahorro" | "Ingreso" | "Otros",
+            "accountName": "Efectivo" | "Nequi" | "Daviplata" | "Banco",
+            "description": "descripción corta",
+            "date": "today" | "yesterday" | "YYYY-MM-DD"
+          }
+
+          Ejemplos:
+          Usuario: por qué hablas así?
+          JSON: {"intent":"conversation_only","replyToUser":"Tienes razón: estaba sonando demasiado rígido. Desde ahora te hablo como asesor financiero: claro, directo y útil. Puedo registrar movimientos, revisar tu mes, detectar fugas y ayudarte a tomar mejores decisiones con tu plata.","confidence":0.98,"emotionalTone":"encouraging","suggestedNextQuestion":"¿Quieres que empecemos revisando tu balance del mes?"}
+
+          Usuario: ingresa 900 mil
+          JSON: {"intent":"create_transaction","shouldCreateTransaction":true,"transaction":{"type":"income","amount":900000,"currency":"COP","category":"Ingreso","accountName":"Efectivo","description":"Ingreso registrado desde el chat","date":"today"},"replyToUser":"Listo, registré un ingreso de $900.000. Ahora lo importante es decidir cuánto de eso se protege antes de gastarlo.","confidence":0.96,"emotionalTone":"encouraging"}
+
+          Usuario: me gasté 35 mil en comida
+          JSON: {"intent":"create_transaction","shouldCreateTransaction":true,"transaction":{"type":"expense","amount":35000,"currency":"COP","category":"Alimentación","accountName":"Efectivo","description":"comida","date":"today"},"replyToUser":"Listo, registré $35.000 en comida. Ojo: los gastos pequeños de comida son los que más se camuflan en el mes.","confidence":0.96,"emotionalTone":"encouraging"}
+
+          Usuario: cómo voy este mes?
+          JSON: {"intent":"query_summary","query":{"range":"this_month","metric":"balance"},"replyToUser":"Voy a revisar tus datos reales del mes y te digo el balance con una lectura clara.","confidence":1,"emotionalTone":"neutral"}
+
+          Contexto financiero real de la app:
+          ${String(context || 'Sin contexto disponible')}
+          `;
+
+            const finalUserMessage = hasImage
+              ? {
+                  role: 'user',
+                  content: [
+                    { type: 'text', text: message },
+                    { type: 'image_url', image_url: { url: `data:${imageMimeType};base64,${imageBase64}` } },
+                  ],
+                }
+              : { role: 'user', content: message };
+
+            const payload = {
+              model: 'deepseek-v4-pro',
+              messages: [
+                { role: 'system', content: systemPrompt },
+                ...safeHistory(chatHistory),
+                finalUserMessage,
+              ],
+              response_format: { type: 'json_object' },
+              thinking: { type: 'enabled' },
+              reasoning_effort: 'high',
+              temperature: 0.65,
+              max_tokens: 8192,
+            };
+
+            try {
+              const dsResponse = await fetch('https://api.deepseek.com/chat/completions', {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${apiKey}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload),
+              });
+
+              const raw = await dsResponse.text();
+              if (!dsResponse.ok) {
+                console.error('DeepSeek API error', dsResponse.status, raw);
+                return res.status(502).json({
+                  error: 'DeepSeek V4 Pro rechazó la solicitud.',
+                  status: dsResponse.status,
+                  details: raw.slice(0, 1500),
+                  source: 'deepseek-v4-pro',
+                });
+              }
+
+              const data = JSON.parse(raw);
+              const content = data?.choices?.[0]?.message?.content;
+              if (!content) {
+                return res.status(502).json({ error: 'DeepSeek V4 Pro respondió vacío.', source: 'deepseek-v4-pro' });
+              }
+
+              const action = JSON.parse(extractJsonObject(content));
+              return res.status(200).json({ action, model: 'deepseek-v4-pro' });
+            } catch (error: any) {
+              console.error('Vercel DeepSeek route failed', error?.message || error);
+              return res.status(500).json({
+                error: 'Falló la ruta Vercel de DeepSeek V4 Pro.',
+                details: String(error?.message || error),
+                source: 'vercel-api',
+              });
+            }
+          }
+          TS
+
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/pages/ChatPage.tsx')
+          text = path.read_text()
+
+          text = text.replace("import { auth, db, callChatWithBot } from '../lib/firebase';", "import { auth, db } from '../lib/firebase';")
+
+          marker = """async function getLocalMonthlySummary(uid: string): Promise<FinancialSummary> {\n  const now = new Date();\n  const start = new Date(now.getFullYear(), now.getMonth(), 1);\n  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);\n  const transactions = await getTransactionsByRange(uid, start, end);\n  return buildSummary(transactions);\n}\n"""
+          insert = marker + r'''
+
+interface VercelBotAction {
+  intent: string;
+  replyToUser: string;
+  shouldCreateTransaction?: boolean;
+  transaction?: {
+    type: TransactionType;
+    amount: number | string;
+    currency?: string;
+    category?: string;
+    accountName?: string;
+    description?: string;
+    date?: string;
+  };
+  query?: {
+    range?: 'today' | 'last_3_days' | 'last_7_days' | 'this_month' | 'custom';
+    metric?: string;
+    category?: string;
+  };
+  confidence?: number;
+  emotionalTone?: 'calm' | 'encouraging' | 'alert' | 'neutral';
+  suggestedNextQuestion?: string;
+}
+
+function botAmountToNumber(value: number | string | undefined): number {
+  if (typeof value === 'number') return value;
+  if (!value) return 0;
+  return normalizeAmount(String(value));
+}
+
+function botDateToDate(value?: string): Date {
+  if (!value || value === 'today') return new Date();
+  if (value === 'yesterday') {
+    const date = new Date();
+    date.setDate(date.getDate() - 1);
+    return date;
+  }
+  const parsed = new Date(`${value}T12:00:00-05:00`);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function buildVercelContext(accounts: Account[], summary: FinancialSummary): string {
+  return [
+    `Cuentas: ${accounts.map((account) => `${account.name} (${formatCOP(account.currentBalance || 0)})`).join(', ')}`,
+    `Resumen del mes: ingresos ${formatCOP(summary.totalIncome)}, gastos ${formatCOP(summary.totalExpenses)}, balance ${formatCOP(summary.balance)}`,
+  ].join('\n');
+}
+
+async function callVercelDeepSeek(actionPayload: Record<string, unknown>): Promise<VercelBotAction> {
+  const response = await fetch('/api/deepseek-chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(actionPayload),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const detail = data?.details || data?.error || `HTTP ${response.status}`;
+    throw new Error(String(detail));
+  }
+
+  if (!data?.action?.replyToUser) {
+    throw new Error('DeepSeek V4 Pro no devolvió una acción válida.');
+  }
+
+  return data.action as VercelBotAction;
+}
+
+async function runVercelDeepSeekChat(
+  uid: string,
+  message: string,
+  imageData: { base64: string; mime: string } | null,
+  currentMessages: ChatMessage[]
+) {
+  await addChatMessage(uid, {
+    text: message,
+    sender: 'user',
+  });
+
+  const accounts = await ensureLocalAccounts(uid);
+  const currentSummary = await getLocalMonthlySummary(uid);
+  const context = buildVercelContext(accounts, currentSummary);
+  const botAction = await callVercelDeepSeek({
+    message,
+    imageBase64: imageData?.base64,
+    imageMimeType: imageData?.mime,
+    context,
+    chatHistory: currentMessages.slice(-12),
+  });
+
+  let replyToUser = botAction.replyToUser;
+  let transactionId: string | undefined;
+  let summary: FinancialSummary | undefined;
+  const suggestedNextQuestion = botAction.suggestedNextQuestion || '';
+
+  if (botAction.intent === 'create_transaction' && botAction.transaction && (botAction.confidence ?? 0) >= 0.7) {
+    const tx = botAction.transaction;
+    const amount = botAmountToNumber(tx.amount);
+    const type = tx.type || inferTransactionType(message);
+    const account = accounts.find((item) => normalizeText(item.name) === normalizeText(tx.accountName || ''))
+      || accounts.find((item) => normalizeText(item.name) === 'efectivo')
+      || accounts[0];
+
+    if (!type || !amount || amount <= 0 || !account) {
+      replyToUser = 'Entendí la intención, pero falta un dato para guardarlo bien. Dime si es ingreso o gasto y el valor exacto.';
+    } else {
+      const created = await addTransaction(uid, {
+        type,
+        amount,
+        currency: 'COP',
+        category: tx.category || inferCategory(message, type),
+        accountId: account.id,
+        accountName: account.name,
+        description: tx.description || inferDescription(message),
+        date: botDateToDate(tx.date),
+        rawText: message,
+        source: 'bot',
+        confidence: botAction.confidence ?? 0.95,
+      });
+      transactionId = created.id;
+      summary = await getLocalMonthlySummary(uid);
+    }
+  }
+
+  if (botAction.intent === 'query_summary') {
+    summary = await getLocalMonthlySummary(uid);
+    replyToUser = `Te leo los datos reales: este mes llevas ${formatCOP(summary.totalIncome)} en ingresos y ${formatCOP(summary.totalExpenses)} en gastos. Tu balance neto va en ${formatCOP(summary.balance)}. ${summary.balance >= 0 ? 'Vas con margen; la jugada inteligente es separar ahorro antes de seguir gastando.' : 'Estás en negativo; la prioridad es cortar fugas pequeñas y revisar gastos variables hoy mismo.'}`;
+  }
+
+  await addChatMessage(uid, {
+    text: replyToUser,
+    sender: 'bot',
+    emotionalTone: botAction.emotionalTone || 'encouraging',
+    suggestedNextQuestion,
+    transactionId,
+    summary,
+    intent: botAction.intent,
+  } as any);
+}
+'''
+          if marker not in text:
+              raise SystemExit('getLocalMonthlySummary marker not found')
+          text = text.replace(marker, insert)
+
+          old_try = """    try {\n      await auth.currentUser.getIdToken(true);\n      await callChatWithBot({ \n        message: finalMessage,\n        imageBase64: imageData?.base64,\n        imageMimeType: imageData?.mime\n      });\n    } catch (error: any) {"""
+          new_try = """    try {\n      await auth.currentUser.getIdToken(true);\n      await runVercelDeepSeekChat(\n        user.uid,\n        finalMessage,\n        imageData ? { base64: imageData.base64, mime: imageData.mime } : null,\n        messages\n      );\n    } catch (error: any) {"""
+          if old_try not in text:
+              raise SystemExit('handleSend callable block not found')
+          text = text.replace(old_try, new_try)
+
+          old_error_log = """      console.error('Chat error full:', {\n        code: error?.code,\n        message: error?.message,\n        details: error?.details,\n        raw: error,\n      });"""
+          new_error_log = """      console.error('Chat error full:', {\n        code: error?.code,\n        message: error?.message,\n        details: error?.details,\n        raw: error,\n      });\n      if (!error?.code) {\n        error.code = 'deepseek/vercel-api';\n      }"""
+          text = text.replace(old_error_log, new_error_log)
+
+          path.write_text(text)
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "fundacionsocial-debug"
+          git config user.email "fundacionsocial@gimnasioemocionalmb.com"
+          git add api/deepseek-chat.ts src/pages/ChatPage.tsx
+          git commit -m "Move DeepSeek chat bot to Vercel API route" || exit 0
+          git push
