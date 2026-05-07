@@ -1,4 +1,4 @@
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import type { Transaction } from '../types';
 
 function toSafeDate(value: unknown): Date {
@@ -10,36 +10,70 @@ function toSafeDate(value: unknown): Date {
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
 }
 
-export function exportTransactionsToExcel(transactions: Transaction[], fileName = 'finanzas-organizadas.xlsx') {
-  const rows = transactions.map((tx) => {
-    const date = toSafeDate(tx.date);
-    return {
-      Fecha: date.toLocaleDateString('es-CO'),
-      Tipo: tx.type === 'income' ? 'Ingreso' : 'Gasto',
-      Descripción: tx.description,
-      Categoría: tx.category,
-      Cuenta: tx.accountName,
-      Valor: tx.amount,
-      Moneda: tx.currency || 'COP',
-      Origen: tx.source || '',
-      Confianza: tx.confidence ?? '',
-    };
-  });
+export async function exportTransactionsToExcel(transactions: Transaction[], fileName = 'finanzas-organizadas.xlsx') {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Ingresos y Egresos Hogar';
+  workbook.created = new Date();
 
   const totalIncome = transactions.filter((tx) => tx.type === 'income').reduce((sum, tx) => sum + Number(tx.amount || 0), 0);
   const totalExpenses = transactions.filter((tx) => tx.type === 'expense').reduce((sum, tx) => sum + Number(tx.amount || 0), 0);
 
-  const workbook = XLSX.utils.book_new();
-  const txSheet = XLSX.utils.json_to_sheet(rows);
-  const summarySheet = XLSX.utils.json_to_sheet([
-    { Indicador: 'Total ingresos', Valor: totalIncome },
-    { Indicador: 'Total gastos', Valor: totalExpenses },
-    { Indicador: 'Balance', Valor: totalIncome - totalExpenses },
-    { Indicador: 'Movimientos exportados', Valor: transactions.length },
-    { Indicador: 'Fecha de exportación', Valor: new Date().toLocaleString('es-CO') },
+  const summary = workbook.addWorksheet('Resumen');
+  summary.columns = [
+    { header: 'Indicador', key: 'indicator', width: 28 },
+    { header: 'Valor', key: 'value', width: 22 },
+  ];
+  summary.addRows([
+    { indicator: 'Total ingresos', value: totalIncome },
+    { indicator: 'Total gastos', value: totalExpenses },
+    { indicator: 'Balance', value: totalIncome - totalExpenses },
+    { indicator: 'Movimientos exportados', value: transactions.length },
+    { indicator: 'Fecha de exportación', value: new Date().toLocaleString('es-CO') },
   ]);
 
-  XLSX.utils.book_append_sheet(workbook, summarySheet, 'Resumen');
-  XLSX.utils.book_append_sheet(workbook, txSheet, 'Movimientos');
-  XLSX.writeFile(workbook, fileName);
+  const movements = workbook.addWorksheet('Movimientos');
+  movements.columns = [
+    { header: 'Fecha', key: 'date', width: 16 },
+    { header: 'Tipo', key: 'type', width: 12 },
+    { header: 'Descripción', key: 'description', width: 38 },
+    { header: 'Categoría', key: 'category', width: 20 },
+    { header: 'Cuenta', key: 'account', width: 18 },
+    { header: 'Valor', key: 'amount', width: 16 },
+    { header: 'Moneda', key: 'currency', width: 10 },
+    { header: 'Origen', key: 'source', width: 14 },
+    { header: 'Confianza', key: 'confidence', width: 12 },
+  ];
+
+  transactions.forEach((tx) => {
+    const date = toSafeDate(tx.date);
+    movements.addRow({
+      date: date.toLocaleDateString('es-CO'),
+      type: tx.type === 'income' ? 'Ingreso' : 'Gasto',
+      description: tx.description,
+      category: tx.category,
+      account: tx.accountName,
+      amount: tx.amount,
+      currency: tx.currency || 'COP',
+      source: tx.source || '',
+      confidence: tx.confidence ?? '',
+    });
+  });
+
+  [summary, movements].forEach((sheet) => {
+    sheet.getRow(1).font = { bold: true };
+    sheet.getRow(1).alignment = { vertical: 'middle' };
+  });
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buffer], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
