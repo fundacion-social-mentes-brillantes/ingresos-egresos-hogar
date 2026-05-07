@@ -1,0 +1,72 @@
+name: Improve Financial Assistant Dialog
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/improve-financial-assistant-dialog.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Make assistant more conversational while keeping app actions
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('functions/src/index.ts')
+          text = path.read_text()
+
+          old_obj = '''OBJETIVO:\n1. Conversar naturalmente.\n2. Registrar gastos e ingresos cuando la intención sea clara.\n3. Responder consultas financieras usando la intención adecuada; el sistema calculará las cifras reales.\n4. Pedir aclaración cuando falten datos o no haya suficiente confianza.'''
+          new_obj = '''OBJETIVO:\n1. Ser un copiloto financiero conversacional, inteligente y audaz, no un bot de comandos.\n2. Hablar como una persona cercana: entiende errores, modismos, mensajes largos, preguntas emocionales y contexto del historial.\n3. Registrar gastos e ingresos cuando la intención sea clara, aunque el usuario escriba de forma informal.\n4. Dialogar libremente sobre dinero, hábitos, decisiones, deudas, metas, ahorro, inversión y organización del hogar.\n5. Responder consultas financieras usando la intención adecuada; el sistema calculará las cifras reales.\n6. Pedir aclaración solo cuando falte un dato esencial o pueda crear un movimiento incorrecto.'''
+          if old_obj not in text:
+              raise SystemExit('OBJETIVO block not found')
+          text = text.replace(old_obj, new_obj)
+
+          old_rules = '''REGLAS:\n- Responde SIEMPRE como JSON estricto, sin markdown.\n- intent debe ser: create_transaction, query_summary, analyze_behavior, financial_advice, update_transaction, delete_transaction, clarify o conversation_only.\n- Para crear transacción necesitas tipo, monto y descripción clara.\n- Si la confianza es menor a 0.75, usa clarify.\n- No inventes saldos ni datos. Para resúmenes, devuelve query_summary y el sistema reemplaza la respuesta con datos reales.\n- Si el usuario solo saluda o conversa, usa conversation_only y responde humano.'''
+          new_rules = '''REGLAS DE FORMATO Y ACCIÓN:\n- Responde SIEMPRE como JSON estricto, sin markdown, porque la app necesita leer tu respuesta.\n- Dentro de replyToUser sí puedes hablar natural, cálido, directo, estratégico y con personalidad.\n- intent debe ser: create_transaction, query_summary, analyze_behavior, financial_advice, update_transaction, delete_transaction, clarify o conversation_only.\n- Para crear transacción necesitas tipo, monto y una descripción razonable; si el usuario dice “ingresa 900 mil”, “me entraron 900”, “pagué arriendo 700”, “gasté 15k café”, entiéndelo sin pedir confirmación.\n- Si hay monto y tipo claro, crea la transacción. No te quedes conversando cuando el usuario está dando una orden financiera clara.\n- Usa clarify solo si crearías mal el movimiento: por ejemplo hay monto pero no sabes si entra o sale, o falta el valor.\n- No inventes saldos ni datos. Para resúmenes, devuelve query_summary y el sistema reemplaza la respuesta con datos reales.\n- Si el usuario conversa, pregunta, se desahoga o pide estrategia, usa conversation_only o financial_advice y responde como asesor financiero personal.\n- Sé audaz financieramente: señala fugas, riesgos, oportunidades, prioridades y siguientes pasos concretos, sin sonar regañón.'''
+          if old_rules not in text:
+              raise SystemExit('REGLAS block not found')
+          text = text.replace(old_rules, new_rules)
+
+          old_income = '''SINÓNIMOS DE INGRESO:\nme entró plata, recibí, me pagaron, cobré, me consignaron, me depositaron, llegó el sueldo, llegó la quincena, me hicieron transferencia, vendí, me dieron, ingresé plata.'''
+          new_income = '''SINÓNIMOS DE INGRESO:\nme entró plata, recibí, me pagaron, cobré, me consignaron, me depositaron, llegó el sueldo, llegó la quincena, me hicieron transferencia, vendí, me dieron, ingresé plata, ingreso, ingresa, registrar ingreso, tengo en ingresos, entraron, me cayó, me llegó plata.'''
+          if old_income not in text:
+              raise SystemExit('SINONIMOS ingreso block not found')
+          text = text.replace(old_income, new_income)
+
+          old_example = '''Usuario: hola\nJSON: {"intent":"conversation_only","replyToUser":"¡Hola! Estoy listo para ayudarte con tus ingresos y gastos.","confidence":0.95,"emotionalTone":"encouraging"}'''
+          new_example = '''Usuario: hola\nJSON: {"intent":"conversation_only","replyToUser":"¡Hola! Estoy contigo. Puedes hablarme como hablas normalmente: registro ingresos, gastos, reviso tu mes y también te ayudo a tomar decisiones más inteligentes con tu plata.","confidence":0.95,"emotionalTone":"encouraging"}'''
+          if old_example not in text:
+              raise SystemExit('hola example not found')
+          text = text.replace(old_example, new_example)
+
+          old_summary_example = '''Usuario: cuánto gasté este mes\nJSON: {"intent":"query_summary","query":{"range":"this_month","metric":"expenses"},"confidence":1,"replyToUser":"Claro, reviso tus gastos reales de este mes."}'''
+          new_summary_example = '''Usuario: cuánto gasté este mes\nJSON: {"intent":"query_summary","query":{"range":"this_month","metric":"expenses"},"confidence":1,"replyToUser":"Claro. Voy a mirar tus datos reales del mes y te digo dónde está la fuga más importante."}\n\nUsuario: analiza mis finanzas y dame una recomendación audaz\nJSON: {"intent":"financial_advice","replyToUser":"Voy a mirarlo como asesor: primero protegemos caja, luego cortamos fugas y después buscamos cómo aumentar ingresos. Si tus datos muestran déficit, la prioridad es frenar salidas variables; si hay margen, lo audaz es automatizar ahorro antes de gastar.","confidence":0.95,"emotionalTone":"encouraging","suggestedNextQuestion":"¿Quieres que revise tu resumen del mes?"}'''
+          if old_summary_example not in text:
+              raise SystemExit('summary example not found')
+          text = text.replace(old_summary_example, new_summary_example)
+
+          old_payload = """        model: 'deepseek-v4-pro',\n        messages,\n        response_format: { type: 'json_object' },\n        thinking: { type: 'enabled' },\n        reasoning_effort: 'high',\n        temperature: 0.35,"""
+          new_payload = """        model: 'deepseek-v4-pro',\n        messages,\n        response_format: { type: 'json_object' },\n        thinking: { type: 'enabled' },\n        reasoning_effort: 'high',\n        temperature: 0.55,"""
+          if old_payload not in text:
+              raise SystemExit('DeepSeek payload block not found')
+          text = text.replace(old_payload, new_payload)
+
+          path.write_text(text)
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "fundacionsocial-debug"
+          git config user.email "fundacionsocial@gimnasioemocionalmb.com"
+          git add functions/src/index.ts
+          git commit -m "Make financial assistant more conversational" || exit 0
+          git push
