@@ -19,12 +19,14 @@ import {
   increment,
 } from 'firebase/firestore';
 import { db } from './firebase';
-import type { Transaction, Account, ChatMessage, AppSettings, UserProfile } from '../types';
+import type { Transaction, Account, ChatMessage, AppSettings, UserProfile, Debt } from '../types';
 
 // -- Path helpers ------------------------------------------------------------
 const userRef = (uid: string) => doc(db, 'users', uid);
 const txCol = (uid: string) => collection(db, 'users', uid, 'transactions');
 const txRef = (uid: string, id: string) => doc(db, 'users', uid, 'transactions', id);
+const debtCol = (uid: string) => collection(db, 'users', uid, 'debts');
+const debtRef = (uid: string, id: string) => doc(db, 'users', uid, 'debts', id);
 const accCol = (uid: string) => collection(db, 'users', uid, 'accounts');
 const accRef = (uid: string, id: string) => doc(db, 'users', uid, 'accounts', id);
 const chatCol = (uid: string) => collection(db, 'users', uid, 'chatMessages');
@@ -48,6 +50,11 @@ function toDate(value: unknown): Date {
   return new Date();
 }
 
+function toOptionalDate(value: unknown): Date | null {
+  if (!value) return null;
+  return toDate(value);
+}
+
 function normalizeTransaction(id: string, data: Record<string, any>): Transaction {
   return {
     id,
@@ -57,6 +64,24 @@ function normalizeTransaction(id: string, data: Record<string, any>): Transactio
     createdAt: toDate(data.createdAt),
     updatedAt: toDate(data.updatedAt),
   } as Transaction;
+}
+
+function normalizeDebt(id: string, data: Record<string, any>): Debt {
+  const amountOriginal = Number(data.amountOriginal || 0);
+  const amountPaid = Number(data.amountPaid || 0);
+  const status = data.status || (amountPaid >= amountOriginal ? 'paid' : amountPaid > 0 ? 'partial' : 'open');
+
+  return {
+    id,
+    ...data,
+    amountOriginal,
+    amountPaid,
+    status,
+    dueDate: toOptionalDate(data.dueDate),
+    closedAt: toOptionalDate(data.closedAt),
+    createdAt: toDate(data.createdAt),
+    updatedAt: toDate(data.updatedAt),
+  } as Debt;
 }
 
 // -- User profile ------------------------------------------------------------
@@ -178,6 +203,53 @@ export async function deleteTransaction(uid: string, id: string) {
   }
 
   await batch.commit();
+}
+
+// -- Debts and loans ---------------------------------------------------------
+export async function getDebts(uid: string, limitCount = 100): Promise<Debt[]> {
+  const snap = await getDocs(query(debtCol(uid), orderBy('createdAt', 'desc'), limit(limitCount)));
+  return snap.docs.map((d) => normalizeDebt(d.id, d.data()));
+}
+
+export async function addDebt(uid: string, data: Omit<Debt, 'id' | 'createdAt' | 'updatedAt'>) {
+  const amountOriginal = Number(data.amountOriginal || 0);
+  const amountPaid = Number(data.amountPaid || 0);
+  return addDoc(debtCol(uid), cleanUndefinedFields({
+    ...data,
+    amountOriginal,
+    amountPaid,
+    currency: data.currency || 'COP',
+    status: data.status || (amountPaid >= amountOriginal ? 'paid' : amountPaid > 0 ? 'partial' : 'open'),
+    dueDate: data.dueDate ? Timestamp.fromDate(data.dueDate) : null,
+    closedAt: data.closedAt ? Timestamp.fromDate(data.closedAt) : null,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }));
+}
+
+export async function updateDebt(uid: string, id: string, data: Partial<Debt>) {
+  const payload: Record<string, unknown> = cleanUndefinedFields({ ...data, updatedAt: serverTimestamp() });
+  if (data.dueDate !== undefined) payload.dueDate = data.dueDate ? Timestamp.fromDate(data.dueDate) : null;
+  if (data.closedAt !== undefined) payload.closedAt = data.closedAt ? Timestamp.fromDate(data.closedAt) : null;
+  return updateDoc(debtRef(uid, id), payload);
+}
+
+export async function deleteDebt(uid: string, id: string) {
+  return deleteDoc(debtRef(uid, id));
+}
+
+export async function registerDebtPayment(uid: string, id: string, amount: number) {
+  const current = await getDoc(debtRef(uid, id));
+  if (!current.exists()) return;
+
+  const debt = normalizeDebt(current.id, current.data());
+  const newPaid = Math.min(debt.amountOriginal, debt.amountPaid + Number(amount || 0));
+  const newStatus = newPaid >= debt.amountOriginal ? 'paid' : newPaid > 0 ? 'partial' : 'open';
+  return updateDebt(uid, id, {
+    amountPaid: newPaid,
+    status: newStatus,
+    closedAt: newStatus === 'paid' ? new Date() : null,
+  });
 }
 
 // -- Chat messages -----------------------------------------------------------
