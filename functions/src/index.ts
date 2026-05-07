@@ -366,6 +366,41 @@ async function ensureDefaultAccounts(uid: string): Promise<any[]> {
   return created;
 }
 
+function serializeGeneratedAt(value: any): string {
+  if (value instanceof Date) return value.toISOString();
+  if (value?.toDate) return value.toDate().toISOString();
+  if (value) return String(value);
+  return new Date().toISOString();
+}
+
+function sanitizeTransactionCreated(transactionCreated: any) {
+  if (!transactionCreated) return null;
+
+  return {
+    id: transactionCreated.id,
+    type: transactionCreated.type,
+    amount: transactionCreated.amount,
+    category: transactionCreated.category,
+    description: transactionCreated.description,
+    accountName: transactionCreated.accountName,
+  };
+}
+
+function sanitizeSummaryData(summaryData: any) {
+  if (!summaryData) return null;
+
+  return {
+    totalIncome: Number(summaryData.totalIncome || 0),
+    totalExpenses: Number(summaryData.totalExpenses || 0),
+    balance: Number(summaryData.balance || 0),
+    byCategory: summaryData.byCategory || {},
+    topCategory: summaryData.topCategory || null,
+    transactionCount: Number(summaryData.transactionCount || 0),
+    range: summaryData.range,
+    generatedAt: serializeGeneratedAt(summaryData.generatedAt),
+  };
+}
+
 async function callDeepSeek(
   userMessage: string,
   imageBase64: string | null,
@@ -472,15 +507,25 @@ FECHA ACTUAL (Colombia): ${format(new Date(), 'yyyy-MM-dd HH:mm')}
 }
 
 export const chatWithBot = onCall({ secrets: [DEEPSEEK_API_KEY] }, async (request) => {
-  if (!request.auth) throw new HttpsError('unauthenticated', 'El usuario debe estar autenticado.');
-
   const { message, imageBase64, imageMimeType } = request.data || {};
+  const hasImage = Boolean(imageBase64);
+
+  console.log('chatWithBot start', {
+    hasAuth: !!request.auth,
+    uid: request.auth?.uid || null,
+    hasMessage: typeof request.data?.message === 'string',
+    hasImage,
+  });
+
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Tu sesión no está activa. Vuelve a iniciar sesión.');
+  }
+
   if (!message || typeof message !== 'string') throw new HttpsError('invalid-argument', 'El mensaje es obligatorio.');
 
   const uid = request.auth.uid;
   const db = admin.firestore();
   const chatCol = db.collection('users').doc(uid).collection('chatMessages');
-  const hasImage = Boolean(imageBase64);
 
   if (hasImage) {
     if (typeof imageBase64 !== 'string' || typeof imageMimeType !== 'string' || !imageMimeType.startsWith('image/')) {
@@ -501,6 +546,10 @@ export const chatWithBot = onCall({ secrets: [DEEPSEEK_API_KEY] }, async (reques
     await chatCol.add(userMsgData);
 
     let accounts = await ensureDefaultAccounts(uid);
+    if (!Array.isArray(accounts)) accounts = [];
+    if (accounts.length === 0) {
+      console.warn('ensureDefaultAccounts returned no accounts', { uid });
+    }
 
     const [recentTxsSnap, chatHistorySnap] = await Promise.all([
       db.collection('users').doc(uid).collection('transactions').orderBy('date', 'desc').limit(10).get(),
@@ -547,46 +596,60 @@ Resumen mes: Ingresos $${monthlySummary.totalIncome}, Gastos $${monthlySummary.t
     if (botAction.intent === 'create_transaction' && botAction.transaction && botAction.confidence >= 0.75) {
       const tx = botAction.transaction;
       const amount = normalizeAmountFromBot(tx.amount);
-      const category = canonicalCategory(tx.category || tx.description || 'Otros');
+      const description = String(tx.description || inferDescription(message)).trim();
+      const txType = tx.type === 'income' || tx.type === 'expense' ? tx.type : inferTypeFromText(message);
+      const category = canonicalCategory(tx.category || description || 'Otros');
       const accountName = canonicalAccountName(tx.accountName || message || 'Efectivo', accounts);
 
-      if (!Number.isFinite(amount) || amount <= 0 || !tx.description || !tx.type) {
+      if (!Number.isFinite(amount) || amount <= 0 || !description || !txType) {
         botAction.replyToUser = 'No alcancé a identificar bien todos los detalles del movimiento. ¿Me dices el valor y en qué fue?';
         botAction.intent = 'clarify';
       } else {
         let account = accounts.find((a) => a.name === accountName);
         if (!account) account = accounts.find((a) => a.name === 'Efectivo') || accounts[0];
 
-        const batch = db.batch();
-        const txRef = db.collection('users').doc(uid).collection('transactions').doc();
-        const accRef = db.collection('users').doc(uid).collection('accounts').doc(account.id);
+        if (!account?.id) {
+          console.warn('No valid account found for chat transaction; retrying defaults', { uid, accountName });
+          accounts = await ensureDefaultAccounts(uid);
+          account = accounts.find((a) => a.name === accountName) || accounts.find((a) => a.name === 'Efectivo') || accounts[0];
+        }
 
-        batch.set(txRef, {
-          type: tx.type,
-          amount,
-          category,
-          description: tx.description,
-          accountId: account.id,
-          accountName: account.name,
-          currency: 'COP',
-          source: 'bot',
-          confidence: botAction.confidence,
-          date: parseTransactionDate(tx.date),
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          rawText: message,
-          wasFromImage: hasImage,
-        });
+        if (!account?.id) {
+          botAction.replyToUser = 'Puedo ayudarte con ese movimiento, pero no encontré una cuenta disponible para guardarlo. Revisa tus cuentas e inténtalo de nuevo.';
+          botAction.intent = 'clarify';
+          botAction.suggestedNextQuestion = '¿Quieres revisar tus cuentas?';
+        } else {
+          const batch = db.batch();
+          const txRef = db.collection('users').doc(uid).collection('transactions').doc();
+          const accRef = db.collection('users').doc(uid).collection('accounts').doc(account.id);
 
-        const balanceChange = tx.type === 'income' ? amount : -amount;
-        batch.update(accRef, {
-          currentBalance: admin.firestore.FieldValue.increment(balanceChange),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
+          batch.set(txRef, {
+            type: txType,
+            amount,
+            category,
+            description,
+            accountId: account.id,
+            accountName: account.name,
+            currency: 'COP',
+            source: 'bot',
+            confidence: botAction.confidence,
+            date: parseTransactionDate(tx.date),
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            rawText: message,
+            wasFromImage: hasImage,
+          });
 
-        await batch.commit();
-        const newDoc = await txRef.get();
-        transactionCreated = { id: newDoc.id, ...newDoc.data() };
+          const balanceChange = txType === 'income' ? amount : -amount;
+          batch.update(accRef, {
+            currentBalance: admin.firestore.FieldValue.increment(balanceChange),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+
+          await batch.commit();
+          const newDoc = await txRef.get();
+          transactionCreated = { id: newDoc.id, ...newDoc.data() };
+        }
       }
     }
 
@@ -624,6 +687,9 @@ Resumen mes: Ingresos $${monthlySummary.totalIncome}, Gastos $${monthlySummary.t
       botAction.intent = 'clarify';
     }
 
+    const safeTransactionCreated = sanitizeTransactionCreated(transactionCreated);
+    const safeSummary = sanitizeSummaryData(summaryData);
+
     const botMsg: any = {
       text: botAction.replyToUser,
       sender: 'bot',
@@ -633,19 +699,24 @@ Resumen mes: Ingresos $${monthlySummary.totalIncome}, Gastos $${monthlySummary.t
       suggestedNextQuestion: botAction.suggestedNextQuestion || '',
     };
     if (transactionCreated) botMsg.transactionId = transactionCreated.id;
-    if (summaryData) botMsg.summary = summaryData;
+    if (safeSummary) botMsg.summary = safeSummary;
     await chatCol.add(botMsg);
 
     return {
       replyToUser: botAction.replyToUser,
       intent: botAction.intent,
-      emotionalTone: botAction.emotionalTone,
-      suggestedNextQuestion: botAction.suggestedNextQuestion,
-      transactionCreated,
-      summary: summaryData,
+      emotionalTone: botAction.emotionalTone || 'neutral',
+      suggestedNextQuestion: botAction.suggestedNextQuestion || '',
+      transactionCreated: safeTransactionCreated,
+      summary: safeSummary,
     };
   } catch (error: any) {
-    console.error('Chat Error:', error);
+    console.error('Chat Error Full:', {
+      message: error?.message,
+      code: error?.code,
+      stack: error?.stack,
+      details: error?.details,
+    });
     const friendly = 'Tuve un problema técnico al procesar eso, pero ya recibí tu mensaje. Intenta nuevamente en unos segundos.';
     try {
       await chatCol.add({

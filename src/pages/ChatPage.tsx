@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { db, callChatWithBot } from '../lib/firebase';
+import { auth, db, callChatWithBot } from '../lib/firebase';
 import {
   collection,
   query,
@@ -10,10 +10,68 @@ import {
 } from 'firebase/firestore';
 import type { ChatMessage } from '../types';
 import { formatCOP } from '../types';
-import { Send, Bot, Loader2, RefreshCw, CheckCircle2, TrendingUp, TrendingDown, PieChart, Image as ImageIcon, X, Camera } from 'lucide-react';
+import { Send, Bot, Loader2, RefreshCw, CheckCircle2, TrendingUp, TrendingDown, PieChart, X, Camera, AlertCircle } from 'lucide-react';
 
 interface ChatPageProps {
   embedded?: boolean;
+}
+
+interface ChatErrorState {
+  friendly: string;
+  code?: string;
+  message?: string;
+  details?: string;
+}
+
+function formatErrorDetails(details: unknown): string | undefined {
+  if (!details) return undefined;
+  if (typeof details === 'string') return details;
+
+  try {
+    return JSON.stringify(details);
+  } catch {
+    return String(details);
+  }
+}
+
+function getFriendlyChatError(error: any): ChatErrorState {
+  const code = error?.code || 'desconocido';
+  const message = error?.message ? String(error.message) : undefined;
+  const details = formatErrorDetails(error?.details);
+
+  if (code === 'functions/unauthenticated') {
+    return {
+      friendly: 'Tu sesión se venció. Cierra sesión y vuelve a entrar con Google.',
+      code,
+      message,
+      details,
+    };
+  }
+
+  if (code === 'functions/invalid-argument') {
+    return {
+      friendly: 'Hubo un problema con los datos enviados. Si enviaste imagen, intenta con una más liviana.',
+      code,
+      message,
+      details,
+    };
+  }
+
+  if (code === 'functions/internal') {
+    return {
+      friendly: 'No pude procesar el mensaje por un error interno. Código: functions/internal.',
+      code,
+      message,
+      details,
+    };
+  }
+
+  return {
+    friendly: `No pude procesar el mensaje. Código: ${code}`,
+    code,
+    message,
+    details,
+  };
 }
 
 export function ChatPage({ embedded = false }: ChatPageProps) {
@@ -22,6 +80,7 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  const [chatError, setChatError] = useState<ChatErrorState | null>(null);
   const [selectedImage, setSelectedImage] = useState<{ base64: string; mime: string; preview: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -56,15 +115,17 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
     if (!file) return;
 
     if (!file.type.startsWith('image/')) {
-      alert('Por favor selecciona una imagen válida.');
+      setChatError({ friendly: 'Por favor selecciona una imagen válida.', code: 'imagen-invalida' });
       return;
     }
 
     // Limit original size to 8MB just in case
     if (file.size > 8 * 1024 * 1024) {
-      alert('La imagen es demasiado grande. Intenta con una de menos de 8MB.');
+      setChatError({ friendly: 'La imagen es demasiado grande. Intenta con una de menos de 8MB.', code: 'imagen-pesada' });
       return;
     }
+
+    setChatError(null);
 
     // Compress/Resize logic
     const reader = new FileReader();
@@ -110,7 +171,14 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
   const handleSend = async (text: string = input) => {
     const messageText = text.trim();
     if (!messageText && !selectedImage) return;
-    if (!user || loading) return;
+    if (loading) return;
+    if (!user || !auth.currentUser) {
+      setChatError({
+        friendly: 'Tu sesión no está activa. Cierra sesión y vuelve a entrar.',
+        code: 'functions/unauthenticated',
+      });
+      return;
+    }
 
     const finalMessage = messageText || "Analiza esta imagen y dime si hay un gasto o ingreso para registrar.";
     
@@ -119,21 +187,23 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
     setSelectedImage(null);
     setLoading(true);
     setIsTyping(true);
+    setChatError(null);
 
     try {
+      await auth.currentUser.getIdToken(true);
       await callChatWithBot({ 
         message: finalMessage,
         imageBase64: imageData?.base64,
         imageMimeType: imageData?.mime
       });
     } catch (error: any) {
-      console.error('Chat error:', error);
-      const code = error.code || '';
-      if (code === 'functions/invalid-argument') {
-        alert('Error en los datos enviados. Verifica el tamaño de la imagen.');
-      } else {
-        alert('Ocurrió un error al procesar tu mensaje.');
-      }
+      console.error('Chat error full:', {
+        code: error?.code,
+        message: error?.message,
+        details: error?.details,
+        raw: error,
+      });
+      setChatError(getFriendlyChatError(error));
     } finally {
       setLoading(false);
       setIsTyping(false);
@@ -285,6 +355,21 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
 
       {/* Input Form */}
       <div className="p-4 border-t border-slate-700/50 bg-slate-800/30">
+        {chatError && (
+          <div className="mb-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-300" />
+              <div className="min-w-0 space-y-1">
+                <p className="font-medium">{chatError.friendly}</p>
+                <p className="break-words text-xs text-red-200/80">
+                  Código: {chatError.code || 'desconocido'}
+                  {chatError.message ? ` · Mensaje: ${chatError.message}` : ''}
+                  {chatError.details ? ` · Detalles: ${chatError.details}` : ''}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
         <form 
           onSubmit={(e) => { e.preventDefault(); handleSend(); }}
           className="flex gap-2 items-end"

@@ -31,6 +31,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const ensureUserProfile = async (firebaseUser: User) => {
     try {
+      await firebaseUser.getIdToken(true);
       const existingProfile = await getUserProfile(firebaseUser.uid);
       if (!existingProfile) {
         await createUserProfile(firebaseUser.uid, {
@@ -40,6 +41,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         });
 
         try {
+          await firebaseUser.getIdToken(true);
           await callSeedDefaultUserData({});
         } catch (e) {
           console.warn('Could not seed default data:', e);
@@ -57,11 +59,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        await ensureUserProfile(firebaseUser);
+      try {
+        if (firebaseUser) {
+          await ensureUserProfile(firebaseUser);
+        }
+        setUser(firebaseUser);
+      } catch (err) {
+        console.error('Auth state handling error:', err);
+        setUser(firebaseUser);
+      } finally {
+        setLoading(false);
       }
-      setUser(firebaseUser);
-      setLoading(false);
     });
     return unsub;
   }, []);
@@ -81,6 +89,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
     // Seed default accounts and categories
     try {
+      await cred.user.getIdToken(true);
       await callSeedDefaultUserData({});
     } catch (e) {
       console.warn('Could not seed default data:', e);
