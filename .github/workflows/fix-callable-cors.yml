@@ -1,0 +1,41 @@
+name: Fix Callable CORS
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/fix-callable-cors.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Add explicit CORS to callable functions
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('functions/src/index.ts')
+          text = path.read_text()
+          old = "const PUBLIC_CALLABLE_OPTIONS = { invoker: 'public' as const };"
+          new = "const PUBLIC_CALLABLE_OPTIONS = { invoker: 'public' as const, cors: true };"
+          if old not in text and new not in text:
+              raise SystemExit('PUBLIC_CALLABLE_OPTIONS block not found')
+          if old in text:
+              text = text.replace(old, new)
+          path.write_text(text)
+          PY
+      - name: Commit patch
+        run: |
+          git config user.name "fundacionsocial-debug"
+          git config user.email "fundacionsocial@gimnasioemocionalmb.com"
+          git add functions/src/index.ts
+          git commit -m "Fix callable CORS for Vercel frontend" || exit 0
+          git push
