@@ -14,6 +14,7 @@ import {
   getTransactionsByRange,
   registerDebtPayment,
   updateDebt,
+  updateTransaction,
 } from '../lib/firestore';
 import type { Account, ChatMessage, Debt, DebtDirection, FinancialSummary, Transaction, TransactionType } from '../types';
 import { DEFAULT_ACCOUNTS, formatCOP } from '../types';
@@ -82,6 +83,17 @@ interface VercelBotAction {
     amount?: number | string | null;
     descriptionHint?: string;
   };
+  updateTarget?: {
+    scope?: 'last' | 'last_income' | 'last_expense' | 'amount_match';
+    type?: TransactionType | null;
+    amount?: number | string | null;
+    descriptionHint?: string;
+  };
+  transactionUpdate?: {
+    amount?: number | string | null;
+    category?: string;
+    description?: string;
+  };
   confidence?: number;
   emotionalTone?: 'calm' | 'encouraging' | 'alert' | 'neutral';
   suggestedNextQuestion?: string;
@@ -105,6 +117,15 @@ function getFriendlyChatError(error: any): ChatErrorState {
   if (code === 'deepseek/vercel-api') {
     return {
       friendly: 'DeepSeek V4 Pro no respondió desde Vercel. Revisa el detalle técnico abajo.',
+      code,
+      message,
+      details,
+    };
+  }
+
+  if (code === 'permission-denied' || code === 'firestore/permission-denied') {
+    return {
+      friendly: 'Faltan permisos de Firestore para esta acción. Ya dejé corregidas las reglas; despliega firestore:rules y vuelve a probar.',
       code,
       message,
       details,
@@ -252,7 +273,7 @@ function botDateToDate(value?: string): Date {
 }
 
 function buildVercelContext(accounts: Account[], summary: FinancialSummary, recentTransactions: Transaction[]): string {
-  const recent = recentTransactions.slice(0, 10).map((tx, index) => (
+  const recent = recentTransactions.slice(0, 50).map((tx, index) => (
     `${index + 1}. ${tx.type === 'income' ? 'ingreso' : 'gasto'} ${formatCOP(tx.amount)} | ${tx.category} | ${tx.description} | cuenta ${tx.accountName}`
   ));
 
@@ -292,6 +313,11 @@ async function callVercelDeepSeek(actionPayload: Record<string, unknown>): Promi
 function looksLikeDeleteRequest(message: string): boolean {
   const text = normalizeText(message);
   return ['borra', 'borrar', 'elimina', 'eliminar', 'quita', 'quitar', 'deshaz', 'deshacer', 'anula', 'anular'].some((word) => text.includes(word));
+}
+
+async function findTransactionToUpdate(uid: string, botAction: VercelBotAction, message: string): Promise<Transaction | null> {
+  const adaptedAction = { ...botAction, deleteTarget: botAction.updateTarget || botAction.deleteTarget };
+  return findTransactionToDelete(uid, adaptedAction, message);
 }
 
 async function findTransactionToDelete(uid: string, botAction: VercelBotAction, message: string): Promise<Transaction | null> {
@@ -338,7 +364,12 @@ function personMatch(debt: Debt, name?: string): boolean {
   if (!name) return true; const a=normalizeText(debt.personName), b=normalizeText(name); return a.includes(b)||b.includes(a);
 }
 async function findDebtForBot(uid: string, botAction: VercelBotAction): Promise<Debt | null> {
-  const debts=(await getDebts(uid,100)).filter(d=>d.status!=='paid');
+  let debts: Debt[] = [];
+  try {
+    debts = (await getDebts(uid,100)).filter(d=>d.status!=='paid');
+  } catch {
+    return null;
+  }
   const payment=botAction.debtPayment||{};
   const direction=payment.direction||null;
   const found=debts.find(d=>(direction?d.direction===direction:true)&&personMatch(d,payment.personName));
@@ -355,8 +386,13 @@ async function runVercelDeepSeekChat(
 
   const accounts = await ensureLocalAccounts(uid);
   const currentSummary = await getLocalMonthlySummary(uid);
-  const recentTransactions = await getTransactions(uid, 20);
-  const debts = await getDebts(uid, 50);
+  const recentTransactions = await getTransactions(uid, 80);
+  let debts: Debt[] = [];
+  try {
+    debts = await getDebts(uid, 50);
+  } catch (error) {
+    console.warn("Debt context unavailable until Firestore rules are deployed", error);
+  }
   const context = buildVercelContext(accounts, currentSummary, recentTransactions) + "\n\n" + debtContext(debts);
 
   const botAction = await callVercelDeepSeek({
@@ -445,6 +481,27 @@ async function runVercelDeepSeekChat(
   if (botAction.intent === 'query_debts') {
     const debts = (await getDebts(uid, 100)).filter(d=>d.status!=='paid');
     replyToUser = debtContext(debts);
+  }
+
+  if (botAction.intent === 'update_transaction') {
+    const txToUpdate = await findTransactionToUpdate(uid, botAction, message);
+    const patch = botAction.transactionUpdate || {};
+    const newAmount = botAmountToNumber(patch.amount);
+
+    if (!txToUpdate) {
+      replyToUser = 'No encontré un movimiento claro para corregir. Dime si es el último gasto, el último ingreso o el valor exacto.';
+    } else if (!newAmount && !patch.category && !patch.description) {
+      replyToUser = 'Entendí que quieres corregir un movimiento, pero falta decir qué cambio hago: valor, categoría o descripción.';
+    } else {
+      await updateTransaction(uid, txToUpdate.id, {
+        amount: newAmount > 0 ? newAmount : txToUpdate.amount,
+        category: patch.category || txToUpdate.category,
+        description: patch.description || txToUpdate.description,
+      } as any);
+      summary = await getLocalMonthlySummary(uid);
+      replyToUser = `Listo, corregí ${txToUpdate.type === 'income' ? 'el ingreso' : 'el gasto'} de ${txToUpdate.description}${newAmount > 0 ? ` a ${formatCOP(newAmount)}` : ''}.`;
+      transactionId = txToUpdate.id;
+    }
   }
 
   if (botAction.intent === 'delete_transaction' || looksLikeDeleteRequest(message)) {
@@ -639,6 +696,18 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
                     <div>
                       <p className="text-xs font-bold text-green-400 uppercase tracking-wider">Movimiento Registrado</p>
                       <p className="text-[10px] text-slate-400">ID: {msg.transactionId.substring(0, 8)}...</p>
+                    </div>
+                  </div>
+                )}
+
+                {msg.debtId && (
+                  <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 flex items-center gap-3 animate-in zoom-in-95 duration-500">
+                    <div className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center shrink-0">
+                      <HandCoins className="w-5 h-5 text-blue-300" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-blue-300 uppercase tracking-wider">Deuda actualizada</p>
+                      <p className="text-[10px] text-slate-400">ID: {msg.debtId.substring(0, 8)}...</p>
                     </div>
                   </div>
                 )}

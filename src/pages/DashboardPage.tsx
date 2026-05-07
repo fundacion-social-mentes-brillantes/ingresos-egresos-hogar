@@ -2,10 +2,11 @@ import { useTransactions, useFinancialSummary, useLast7Days } from '../hooks/use
 import { StatCard } from '../components/ui/Card';
 import { formatCOP } from '../types';
 import { useAuth } from '../contexts/AuthContext';
+import { useDebts } from '../hooks/useDebts';
 import { ChatPage } from './ChatPage';
 import {
   TrendingUp, TrendingDown, Wallet, Activity,
-  Tag, Calendar, Loader2, Info
+  Tag, Calendar, Loader2, Info, HandCoins, AlertTriangle
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -15,9 +16,12 @@ export function DashboardPage() {
   const { transactions, loading } = useTransactions();
   const summary   = useFinancialSummary(transactions);
   const last7     = useLast7Days(transactions);
+  const { debts, summary: debtSummary } = useDebts();
   const last7Total = last7.reduce((s, t) => s + t.amount, 0);
 
   const topCategory = Object.entries(summary.byCategory).sort((a, b) => b[1] - a[1])[0];
+  const expenseBars = Object.entries(summary.byCategory).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const openDebts = debts.filter((debt) => debt.status !== 'paid').slice(0, 4);
   const today = format(new Date(), "EEEE d 'de' MMMM", { locale: es });
 
   if (loading && transactions.length === 0) {
@@ -62,6 +66,24 @@ export function DashboardPage() {
           />
         </div>
 
+        {/* Debt cards */}
+        <div className="grid grid-cols-2 gap-4">
+          <div className="glass rounded-2xl p-4 border border-green-500/20 bg-green-500/5">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-medium text-green-400 uppercase tracking-wider">Te deben</span>
+              <HandCoins className="w-4 h-4 text-green-400" />
+            </div>
+            <p className="text-lg font-bold text-slate-100">{formatCOP(debtSummary.receivable)}</p>
+          </div>
+          <div className="glass rounded-2xl p-4 border border-red-500/20 bg-red-500/5">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-medium text-red-400 uppercase tracking-wider">Debes</span>
+              <AlertTriangle className="w-4 h-4 text-red-400" />
+            </div>
+            <p className="text-lg font-bold text-slate-100">{formatCOP(debtSummary.payable)}</p>
+          </div>
+        </div>
+
         {/* Income/Expense Cards */}
         <div className="grid grid-cols-1 gap-4">
           <div className="glass rounded-2xl p-4 border border-green-500/20 bg-green-500/5">
@@ -79,6 +101,31 @@ export function DashboardPage() {
             </div>
             <p className="text-xl font-bold text-slate-100">{formatCOP(summary.totalExpenses)}</p>
           </div>
+        </div>
+
+        {/* Category bars */}
+        <div className="glass rounded-2xl p-5 border border-slate-700/30">
+          <div className="flex items-center gap-2 mb-4">
+            <Activity className="w-4 h-4 text-blue-400" />
+            <h2 className="text-sm font-semibold text-slate-300">Gastos por categoría</h2>
+          </div>
+          {expenseBars.length > 0 ? (
+            <div className="space-y-3">
+              {expenseBars.map(([category, amount]) => (
+                <div key={category}>
+                  <div className="flex items-center justify-between text-xs mb-1">
+                    <span className="text-slate-300 truncate">{category}</span>
+                    <span className="text-slate-400">{formatCOP(amount)}</span>
+                  </div>
+                  <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                    <div className="h-full bg-gradient-to-r from-red-500 to-amber-400 rounded-full" style={{ width: `${summary.totalExpenses > 0 ? Math.min(100, (amount / summary.totalExpenses) * 100) : 0}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-slate-500 text-xs italic">Aún no hay categorías. Escribe un gasto en el chat y aquí aparecerá el análisis.</p>
+          )}
         </div>
 
         {/* Top Category */}
@@ -104,6 +151,32 @@ export function DashboardPage() {
             </div>
           ) : (
             <p className="text-slate-500 text-xs italic">Sin gastos registrados</p>
+          )}
+        </div>
+
+        {/* Open debts */}
+        <div className="glass rounded-2xl p-5 border border-slate-700/30">
+          <div className="flex items-center gap-2 mb-4">
+            <HandCoins className="w-4 h-4 text-blue-400" />
+            <h2 className="text-sm font-semibold text-slate-300">Deudas pendientes</h2>
+          </div>
+          {openDebts.length > 0 ? (
+            <ul className="space-y-3">
+              {openDebts.map((debt) => {
+                const remaining = Math.max(0, debt.amountOriginal - debt.amountPaid);
+                return (
+                  <li key={debt.id} className="flex items-center justify-between gap-2 border-b border-slate-700/30 pb-2 last:border-0 last:pb-0">
+                    <div className="min-w-0">
+                      <p className="text-sm text-slate-200 truncate font-medium">{debt.personName}</p>
+                      <p className="text-[10px] text-slate-500 uppercase">{debt.direction === 'receivable' ? 'Te debe' : 'Tú debes'}</p>
+                    </div>
+                    <span className={debt.direction === 'receivable' ? 'text-green-400 text-sm font-bold shrink-0' : 'text-red-400 text-sm font-bold shrink-0'}>{formatCOP(remaining)}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="text-slate-500 text-xs text-center py-2 italic">Sin deudas pendientes. Puedes decir: “Juan me debe 50 mil”.</p>
           )}
         </div>
 
@@ -139,7 +212,7 @@ export function DashboardPage() {
         <div className="p-4 rounded-2xl bg-blue-500/10 border border-blue-500/20 flex gap-3 items-start">
           <Info className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" />
           <p className="text-xs text-blue-200/70 leading-relaxed">
-            Puedes preguntarme cosas como "¿Cómo voy este mes?" o "Muéstrame mis gastos en alimentación".
+            Puedes preguntarme cosas como "analiza mis fugas", "quién me debe", "corrige ese gasto a 80 mil" o "descargar Excel".
           </p>
         </div>
       </div>

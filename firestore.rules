@@ -26,6 +26,11 @@ service cloud.firestore {
       match /chatMessages/{messageId} {
         allow read, write: if isOwner(userId);
       }
+
+      // Debts and loans: Isolated by user
+      match /debts/{debtId} {
+        allow read, write: if isOwner(userId);
+      }
       
       // Settings: Isolated by user
       match /settings/{settingId} {
