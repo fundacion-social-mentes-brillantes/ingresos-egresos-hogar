@@ -598,8 +598,13 @@ Resumen mes: Ingresos $${monthlySummary.totalIncome}, Gastos $${monthlySummary.t
         DEEPSEEK_API_KEY.value()
       );
     } catch (error: any) {
-      console.error('AI fallback activated:', error.message || error);
-      botAction = fallbackBotAction(message, hasImage);
+      console.error('DeepSeek V4 Pro failed; fallback disabled:', error.response?.data || error.message || error);
+      void fallbackBotAction;
+      throw new HttpsError(
+        'internal',
+        'DeepSeek V4 Pro no respondió correctamente. No se usó fallback local.',
+        { source: 'deepseek-v4-pro', fallback: 'disabled' }
+      );
     }
 
     let transactionCreated: any = null;

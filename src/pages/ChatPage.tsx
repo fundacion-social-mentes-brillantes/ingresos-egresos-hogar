@@ -128,9 +128,8 @@ function inferCategory(message: string, type: TransactionType): string {
   return 'Otros';
 }
 
-function shouldUseLocalFallback(error: any): boolean {
-  const code = error?.code || '';
-  return code !== 'functions/unauthenticated' && code !== 'functions/invalid-argument';
+function shouldUseLocalFallback(_error: any): boolean {
+  return false;
 }
 
 async function ensureLocalAccounts(uid: string): Promise<Account[]> {
