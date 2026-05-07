@@ -75,7 +75,7 @@ export function TransactionsPage() {
             className="w-full md:w-64"
           />
           <Button
-            variant="secondary"
+            variant="ghost"
             size="sm"
             onClick={handleExport}
             disabled={transactions.length === 0}
