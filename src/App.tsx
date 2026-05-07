@@ -6,6 +6,7 @@ import { DashboardPage } from './pages/DashboardPage';
 import { ChatPage } from './pages/ChatPage';
 import { TransactionsPage } from './pages/TransactionsPage';
 import { ImportPage } from './pages/ImportPage';
+import { DebtsPage } from './pages/DebtsPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { Loader2 } from 'lucide-react';
 
@@ -47,6 +48,12 @@ function AppRoutes() {
       <Route path="/transactions" element={
         <ProtectedRoute>
           <TransactionsPage />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/debts" element={
+        <ProtectedRoute>
+          <DebtsPage />
         </ProtectedRoute>
       } />
 
