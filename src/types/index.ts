@@ -5,6 +5,9 @@ export type TransactionSource = 'bot' | 'manual';
 export type AccountType = 'cash' | 'nequi' | 'daviplata' | 'bank' | 'other';
 export type QueryRange = 'today' | 'this_month' | 'last_3_days' | 'last_7_days' | 'custom';
 export type QueryMetric = 'expenses' | 'income' | 'balance' | 'by_category' | 'behavior_analysis';
+export type DebtDirection = 'receivable' | 'payable';
+export type DebtStatus = 'open' | 'partial' | 'paid';
+export type DebtSource = 'bot' | 'manual';
 export type BotIntent =
   | 'create_transaction'
   | 'query_summary'
@@ -12,6 +15,10 @@ export type BotIntent =
   | 'financial_advice'
   | 'update_transaction'
   | 'delete_transaction'
+  | 'create_debt'
+  | 'query_debts'
+  | 'register_debt_payment'
+  | 'close_debt'
   | 'clarify'
   | 'conversation_only';
 
@@ -50,6 +57,24 @@ export interface Transaction {
   updatedAt: Date;
 }
 
+export interface Debt {
+  id: string;
+  direction: DebtDirection;
+  personName: string;
+  amountOriginal: number;
+  amountPaid: number;
+  currency: 'COP';
+  description: string;
+  notes?: string;
+  dueDate?: Date | null;
+  status: DebtStatus;
+  source: DebtSource;
+  confidence?: number;
+  createdAt: Date;
+  updatedAt: Date;
+  closedAt?: Date | null;
+}
+
 export interface ChatMessage {
   id: string;
   text: string;
@@ -59,6 +84,7 @@ export interface ChatMessage {
   emotionalTone?: string;
   loading?: boolean;
   transactionId?: string;
+  debtId?: string;
   summary?: FinancialSummary;
   imageUrl?: string;
 }
@@ -81,6 +107,23 @@ export interface BotTransactionPayload {
   date: 'today' | string;
 }
 
+export interface BotDebtPayload {
+  direction: DebtDirection;
+  personName: string;
+  amount: number;
+  currency: 'COP';
+  description: string;
+  notes?: string;
+  dueDate?: 'today' | 'tomorrow' | string | null;
+}
+
+export interface BotDebtPaymentPayload {
+  direction?: DebtDirection | null;
+  personName?: string;
+  amount?: number | null;
+  scope?: 'last' | 'person_match' | 'amount_match';
+}
+
 export interface BotQueryPayload {
   range: 'today' | 'last_3_days' | 'last_7_days' | 'this_month' | 'custom';
   metric: 'expenses' | 'income' | 'balance' | 'by_category' | 'behavior_analysis';
@@ -91,6 +134,8 @@ export interface BotAction {
   replyToUser: string;
   shouldCreateTransaction?: boolean;
   transaction?: BotTransactionPayload;
+  debt?: BotDebtPayload;
+  debtPayment?: BotDebtPaymentPayload;
   query?: BotQueryPayload;
   needsConfirmation?: boolean;
   confidence: number;
@@ -104,6 +149,7 @@ export interface BotResponse {
   replyToUser: string;
   intent: BotIntent;
   transactionCreated?: Transaction;
+  debtCreated?: Debt;
   summary?: FinancialSummary;
   suggestedNextQuestion?: string;
   emotionalTone?: string;
