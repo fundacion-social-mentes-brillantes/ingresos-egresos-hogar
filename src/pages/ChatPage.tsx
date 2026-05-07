@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { auth, db, callChatWithBot } from '../lib/firebase';
+import { auth, db } from '../lib/firebase';
 import {
   collection,
   query,
@@ -24,6 +24,29 @@ interface ChatErrorState {
   details?: string;
 }
 
+interface VercelBotAction {
+  intent: string;
+  replyToUser: string;
+  shouldCreateTransaction?: boolean;
+  transaction?: {
+    type?: TransactionType;
+    amount?: number | string;
+    currency?: string;
+    category?: string;
+    accountName?: string;
+    description?: string;
+    date?: string;
+  };
+  query?: {
+    range?: 'today' | 'last_3_days' | 'last_7_days' | 'this_month' | 'custom';
+    metric?: string;
+    category?: string;
+  };
+  confidence?: number;
+  emotionalTone?: 'calm' | 'encouraging' | 'alert' | 'neutral';
+  suggestedNextQuestion?: string;
+}
+
 function formatErrorDetails(details: unknown): string | undefined {
   if (!details) return undefined;
   if (typeof details === 'string') return details;
@@ -39,6 +62,15 @@ function getFriendlyChatError(error: any): ChatErrorState {
   const code = error?.code || 'desconocido';
   const message = error?.message ? String(error.message) : undefined;
   const details = formatErrorDetails(error?.details);
+
+  if (code === 'deepseek/vercel-api') {
+    return {
+      friendly: 'DeepSeek V4 Pro no respondió desde Vercel. Revisa el detalle técnico abajo.',
+      code,
+      message,
+      details,
+    };
+  }
 
   if (code === 'functions/unauthenticated') {
     return {
@@ -128,10 +160,6 @@ function inferCategory(message: string, type: TransactionType): string {
   return 'Otros';
 }
 
-function shouldUseLocalFallback(_error: any): boolean {
-  return false;
-}
-
 async function ensureLocalAccounts(uid: string): Promise<Account[]> {
   const existing = await getAccounts(uid);
   if (existing.length > 0) return existing;
@@ -178,82 +206,125 @@ async function getLocalMonthlySummary(uid: string): Promise<FinancialSummary> {
   return buildSummary(transactions);
 }
 
-async function runLocalChatFallback(uid: string, message: string, hasImage: boolean) {
-  const text = normalizeText(message);
-  let replyToUser = 'Te leo. Puedes contarme un gasto, un ingreso o preguntarme cómo va el mes.';
-  let intent = 'conversation_only';
-  let suggestedNextQuestion = '¿Quieres registrar algo o revisar cómo va el mes?';
-  let transactionId: string | undefined;
-  let summary: FinancialSummary | undefined;
+function botAmountToNumber(value: number | string | undefined): number {
+  if (typeof value === 'number') return value;
+  if (!value) return 0;
+  return normalizeAmount(String(value));
+}
 
+function botDateToDate(value?: string): Date {
+  if (!value || value === 'today') return new Date();
+  if (value === 'yesterday') {
+    const date = new Date();
+    date.setDate(date.getDate() - 1);
+    return date;
+  }
+  const parsed = new Date(`${value}T12:00:00-05:00`);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function buildVercelContext(accounts: Account[], summary: FinancialSummary): string {
+  return [
+    `Cuentas: ${accounts.map((account) => `${account.name} (${formatCOP(account.currentBalance || 0)})`).join(', ')}`,
+    `Resumen del mes: ingresos ${formatCOP(summary.totalIncome)}, gastos ${formatCOP(summary.totalExpenses)}, balance ${formatCOP(summary.balance)}`,
+  ].join('\n');
+}
+
+async function callVercelDeepSeek(actionPayload: Record<string, unknown>): Promise<VercelBotAction> {
+  const response = await fetch('/api/deepseek-chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(actionPayload),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const detail = data?.details || data?.error || `HTTP ${response.status}`;
+    const error: any = new Error(String(detail));
+    error.code = 'deepseek/vercel-api';
+    error.details = data;
+    throw error;
+  }
+
+  if (!data?.action?.replyToUser) {
+    const error: any = new Error('DeepSeek V4 Pro no devolvió una acción válida.');
+    error.code = 'deepseek/vercel-api';
+    error.details = data;
+    throw error;
+  }
+
+  return data.action as VercelBotAction;
+}
+
+async function runVercelDeepSeekChat(
+  uid: string,
+  message: string,
+  imageData: { base64: string; mime: string } | null,
+  currentMessages: ChatMessage[]
+) {
   await addChatMessage(uid, {
     text: message,
     sender: 'user',
   });
 
-  if (hasImage) {
-    intent = 'clarify';
-    replyToUser = 'No pude leer la imagen automáticamente en este momento. Escríbeme el valor y qué compraste o pagaste, y lo registro por ti.';
-    suggestedNextQuestion = '¿Cuánto fue y en qué lo pagaste?';
-  } else if (/^(hola|holi|buenas|buenos dias|buenas tardes|buenas noches|hey)\b/.test(text)) {
-    replyToUser = '¡Hola! Estoy listo. Puedes escribirme “ingresa 900 mil”, “me gasté 10 mil en un helado” o preguntarme “¿cómo voy este mes?”.';
-    suggestedNextQuestion = '¿Quieres registrar un gasto o revisar tu resumen del mes?';
-  } else if (text.includes('como voy') || text.includes('cuanto gaste') || text.includes('cuanto he gastado') || text.includes('resumen') || text.includes('balance')) {
-    intent = 'query_summary';
-    summary = await getLocalMonthlySummary(uid);
-    replyToUser = `Listo, en este mes llevas ${formatCOP(summary.totalExpenses)} en gastos y ${formatCOP(summary.totalIncome)} en ingresos. Tu balance neto es de ${formatCOP(summary.balance)}.`;
-    suggestedNextQuestion = '';
-  } else {
-    const type = inferTransactionType(message);
-    const amount = normalizeAmount(message);
+  const accounts = await ensureLocalAccounts(uid);
+  const currentSummary = await getLocalMonthlySummary(uid);
+  const context = buildVercelContext(accounts, currentSummary);
+  const botAction = await callVercelDeepSeek({
+    message,
+    imageBase64: imageData?.base64,
+    imageMimeType: imageData?.mime,
+    context,
+    chatHistory: currentMessages.slice(-12),
+  });
 
-    if (type && amount > 0) {
-      const accounts = await ensureLocalAccounts(uid);
-      const account = accounts.find((item) => normalizeText(item.name) === 'efectivo') || accounts[0];
+  let replyToUser = botAction.replyToUser;
+  let transactionId: string | undefined;
+  let summary: FinancialSummary | undefined;
+  const suggestedNextQuestion = botAction.suggestedNextQuestion || '';
 
-      if (account) {
-        const description = inferDescription(message);
-        const created = await addTransaction(uid, {
-          type,
-          amount,
-          currency: 'COP',
-          category: inferCategory(message, type),
-          accountId: account.id,
-          accountName: account.name,
-          description,
-          date: new Date(),
-          rawText: message,
-          source: 'bot',
-          confidence: 0.9,
-        });
+  if (botAction.intent === 'create_transaction' && botAction.transaction && (botAction.confidence ?? 0) >= 0.7) {
+    const tx = botAction.transaction;
+    const amount = botAmountToNumber(tx.amount);
+    const type = tx.type || inferTransactionType(message);
+    const account = accounts.find((item) => normalizeText(item.name) === normalizeText(tx.accountName || ''))
+      || accounts.find((item) => normalizeText(item.name) === 'efectivo')
+      || accounts[0];
 
-        intent = 'create_transaction';
-        transactionId = created.id;
-        summary = await getLocalMonthlySummary(uid);
-        replyToUser = type === 'income'
-          ? `Listo, registré ese ingreso por ${formatCOP(amount)}. Balance del mes: ${formatCOP(summary.balance)}.`
-          : `Listo, registré ese gasto por ${formatCOP(amount)}. Balance del mes: ${formatCOP(summary.balance)}.`;
-        suggestedNextQuestion = '¿Quieres ver el resumen del mes?';
-      } else {
-        intent = 'clarify';
-        replyToUser = 'Entendí el movimiento, pero no encontré una cuenta disponible para guardarlo. Revisa tus cuentas e inténtalo de nuevo.';
-        suggestedNextQuestion = '¿Quieres revisar tus cuentas?';
-      }
-    } else if (amount > 0) {
-      intent = 'clarify';
-      replyToUser = `Veo ${formatCOP(amount)}, pero necesito saber si es ingreso o gasto. Escríbeme: “ingresa ${formatCOP(amount)}” o “gasté ${formatCOP(amount)}”.`;
-      suggestedNextQuestion = '';
+    if (!type || !amount || amount <= 0 || !account) {
+      replyToUser = 'Entendí la intención, pero falta un dato para guardarlo bien. Dime si es ingreso o gasto y el valor exacto.';
+    } else {
+      const created = await addTransaction(uid, {
+        type,
+        amount,
+        currency: 'COP',
+        category: tx.category || inferCategory(message, type),
+        accountId: account.id,
+        accountName: account.name,
+        description: tx.description || inferDescription(message),
+        date: botDateToDate(tx.date),
+        rawText: message,
+        source: 'bot',
+        confidence: botAction.confidence ?? 0.95,
+      });
+      transactionId = created.id;
+      summary = await getLocalMonthlySummary(uid);
     }
+  }
+
+  if (botAction.intent === 'query_summary') {
+    summary = await getLocalMonthlySummary(uid);
+    replyToUser = `Te leo los datos reales: este mes llevas ${formatCOP(summary.totalIncome)} en ingresos y ${formatCOP(summary.totalExpenses)} en gastos. Tu balance neto va en ${formatCOP(summary.balance)}. ${summary.balance >= 0 ? 'Vas con margen; la jugada inteligente es separar ahorro antes de seguir gastando.' : 'Estás en negativo; la prioridad es cortar fugas pequeñas y revisar gastos variables hoy mismo.'}`;
   }
 
   await addChatMessage(uid, {
     text: replyToUser,
     sender: 'bot',
-    emotionalTone: 'neutral',
+    emotionalTone: botAction.emotionalTone || 'encouraging',
     suggestedNextQuestion,
     transactionId,
     summary,
-    intent,
+    intent: botAction.intent,
   } as any);
 }
 
@@ -302,7 +373,6 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
       return;
     }
 
-    // Limit original size to 8MB just in case
     if (file.size > 8 * 1024 * 1024) {
       setChatError({ friendly: 'La imagen es demasiado grande. Intenta con una de menos de 8MB.', code: 'imagen-pesada' });
       return;
@@ -310,7 +380,6 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
 
     setChatError(null);
 
-    // Compress/Resize logic
     const reader = new FileReader();
     reader.onload = (event) => {
       const img = new window.Image();
@@ -347,7 +416,6 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
       img.src = event.target?.result as string;
     };
     reader.readAsDataURL(file);
-    // Clear input so same file can be re-selected if removed
     e.target.value = '';
   };
 
@@ -374,11 +442,12 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
 
     try {
       await auth.currentUser.getIdToken(true);
-      await callChatWithBot({ 
-        message: finalMessage,
-        imageBase64: imageData?.base64,
-        imageMimeType: imageData?.mime
-      });
+      await runVercelDeepSeekChat(
+        user.uid,
+        finalMessage,
+        imageData ? { base64: imageData.base64, mime: imageData.mime } : null,
+        messages
+      );
     } catch (error: any) {
       console.error('Chat error full:', {
         code: error?.code,
@@ -386,21 +455,6 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
         details: error?.details,
         raw: error,
       });
-
-      if (shouldUseLocalFallback(error)) {
-        try {
-          console.warn('Using local chat fallback because callable failed:', error?.code || error?.message || error);
-          await runLocalChatFallback(user.uid, finalMessage, Boolean(imageData?.base64));
-          return;
-        } catch (fallbackError: any) {
-          console.error('Local chat fallback failed:', {
-            code: fallbackError?.code,
-            message: fallbackError?.message,
-            details: fallbackError?.details,
-            raw: fallbackError,
-          });
-        }
-      }
 
       setChatError(getFriendlyChatError(error));
     } finally {
@@ -411,7 +465,6 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
 
   return (
     <div className={`flex flex-col h-full bg-slate-900/40 relative ${embedded ? '' : 'max-w-4xl mx-auto w-full glass rounded-3xl overflow-hidden shadow-2xl'}`}>
-      {/* Header */}
       <div className="px-6 py-4 border-b border-slate-700/50 flex items-center justify-between bg-slate-800/20">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
@@ -429,7 +482,6 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
         </div>
       </div>
 
-      {/* Messages */}
       <div 
         ref={scrollRef}
         className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar"
@@ -461,7 +513,6 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
               {msg.text}
             </div>
 
-            {/* Rich Widgets */}
             {msg.sender === 'bot' && (
               <div className="w-full max-w-[85%] mt-2 space-y-2">
                 {msg.transactionId && (
@@ -507,7 +558,6 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
               </div>
             )}
             
-            {/* Suggested Chips (Only on the last bot message) */}
             {msg.sender === 'bot' && msg.suggestedNextQuestion && msg === messages[messages.length - 1] && (
               <div className="flex flex-wrap gap-2 mt-3 ml-2">
                 <button
@@ -533,7 +583,6 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
         )}
       </div>
 
-      {/* Image Preview Overlay */}
       {selectedImage && (
         <div className="px-4 py-2 border-t border-slate-700/50 bg-slate-800/50 flex items-center gap-3 animate-in slide-in-from-bottom-2">
           <div className="relative group">
@@ -552,7 +601,6 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
         </div>
       )}
 
-      {/* Input Form */}
       <div className="p-4 border-t border-slate-700/50 bg-slate-800/30">
         {chatError && (
           <div className="mb-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">
