@@ -8,8 +8,9 @@ import {
   limit,
   onSnapshot
 } from 'firebase/firestore';
-import type { ChatMessage } from '../types';
-import { formatCOP } from '../types';
+import { addAccount, addChatMessage, addTransaction, getAccounts, getTransactionsByRange } from '../lib/firestore';
+import type { Account, ChatMessage, FinancialSummary, TransactionType } from '../types';
+import { DEFAULT_ACCOUNTS, formatCOP } from '../types';
 import { Send, Bot, Loader2, RefreshCw, CheckCircle2, TrendingUp, TrendingDown, PieChart, X, Camera, AlertCircle } from 'lucide-react';
 
 interface ChatPageProps {
@@ -72,6 +73,184 @@ function getFriendlyChatError(error: any): ChatErrorState {
     message,
     details,
   };
+}
+
+function normalizeText(value: string): string {
+  return String(value || '')
+    .toLowerCase()
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function normalizeAmount(value: string): number {
+  const match = normalizeText(value).match(/(?:\$\s*)?(\d+(?:[.,]\d+)?)\s*(mil|lucas?|k|millones?|millon)?/i);
+  if (!match) return 0;
+
+  const rawNumber = match[1].replace(',', '.');
+  const base = Number.parseFloat(rawNumber);
+  if (!Number.isFinite(base)) return 0;
+
+  const scale = match[2] || '';
+  if (scale.startsWith('mil') || scale.startsWith('luca') || scale === 'k') return base * 1000;
+  if (scale.startsWith('millon')) return base * 1000000;
+  return base;
+}
+
+function inferTransactionType(message: string): TransactionType | null {
+  const text = normalizeText(message);
+  const incomeWords = ['me entro', 'recibi', 'me pagaron', 'cobre', 'me consignaron', 'me depositaron', 'vendi', 'ingrese'];
+  const expenseWords = ['me gaste', 'gaste', 'compre', 'pague', 'almorce', 'recargue', 'tanquie', 'me toco pagar'];
+
+  if (incomeWords.some((word) => text.includes(word))) return 'income';
+  if (expenseWords.some((word) => text.includes(word))) return 'expense';
+  return null;
+}
+
+function inferDescription(message: string): string {
+  const description = message
+    .replace(/\$?\s*\d+(?:[.,]\d+)?\s*(mil|lucas?|k|millones?|millon)?/gi, '')
+    .replace(/\b(me gaste|gast[eé]|compre|compr[eé]|pague|pagu[eé]|me pagaron|recibi|recib[ií]|cobre|cobr[eé]|en|por|con|de)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return description || 'Movimiento registrado desde el chat';
+}
+
+function inferCategory(message: string, type: TransactionType): string {
+  if (type === 'income') return 'Ingreso';
+
+  const text = normalizeText(message);
+  if (['helado', 'comida', 'mercado', 'cafe', 'almuerzo', 'restaurante', 'tienda'].some((word) => text.includes(word))) return 'Alimentación';
+  if (['bus', 'taxi', 'uber', 'gasolina', 'transporte', 'pasaje'].some((word) => text.includes(word))) return 'Transporte';
+  if (['arriendo', 'luz', 'agua', 'gas', 'internet', 'hogar'].some((word) => text.includes(word))) return 'Hogar';
+  if (['medicina', 'farmacia', 'salud', 'doctor'].some((word) => text.includes(word))) return 'Salud';
+  return 'Otros';
+}
+
+function shouldUseLocalFallback(error: any): boolean {
+  const code = error?.code || '';
+  return code !== 'functions/unauthenticated' && code !== 'functions/invalid-argument';
+}
+
+async function ensureLocalAccounts(uid: string): Promise<Account[]> {
+  const existing = await getAccounts(uid);
+  if (existing.length > 0) return existing;
+
+  await Promise.all(
+    DEFAULT_ACCOUNTS.map((account) =>
+      addAccount(uid, {
+        ...account,
+        initialBalance: 0,
+        currentBalance: 0,
+        active: true,
+      })
+    )
+  );
+
+  return getAccounts(uid);
+}
+
+function buildSummary(transactions: Awaited<ReturnType<typeof getTransactionsByRange>>): FinancialSummary {
+  const totalIncome = transactions.filter((t) => t.type === 'income').reduce((sum, tx) => sum + tx.amount, 0);
+  const totalExpenses = transactions.filter((t) => t.type === 'expense').reduce((sum, tx) => sum + tx.amount, 0);
+  const byCategory = transactions
+    .filter((t) => t.type === 'expense')
+    .reduce((acc, tx) => {
+      acc[tx.category] = (acc[tx.category] || 0) + tx.amount;
+      return acc;
+    }, {} as Record<string, number>);
+
+  return {
+    totalIncome,
+    totalExpenses,
+    balance: totalIncome - totalExpenses,
+    byCategory,
+    range: 'this_month',
+    generatedAt: new Date(),
+  };
+}
+
+async function getLocalMonthlySummary(uid: string): Promise<FinancialSummary> {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), 1);
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+  const transactions = await getTransactionsByRange(uid, start, end);
+  return buildSummary(transactions);
+}
+
+async function runLocalChatFallback(uid: string, message: string, hasImage: boolean) {
+  const text = normalizeText(message);
+  let replyToUser = 'Te leo. Puedes contarme un gasto, un ingreso o preguntarme cómo va el mes.';
+  let intent = 'conversation_only';
+  let suggestedNextQuestion = '¿Quieres registrar algo o revisar cómo va el mes?';
+  let transactionId: string | undefined;
+  let summary: FinancialSummary | undefined;
+
+  await addChatMessage(uid, {
+    text: message,
+    sender: 'user',
+  });
+
+  if (hasImage) {
+    intent = 'clarify';
+    replyToUser = 'No pude leer la imagen automáticamente en este momento. Escríbeme el valor y qué compraste o pagaste, y lo registro por ti.';
+    suggestedNextQuestion = '¿Cuánto fue y en qué lo pagaste?';
+  } else if (/^(hola|holi|buenas|buenos dias|buenas tardes|buenas noches|hey)\b/.test(text)) {
+    replyToUser = '¡Hola! Estoy listo para ayudarte con tus ingresos y gastos. Puedes escribirme algo como: “me gasté 10 mil en un helado” o preguntarme “¿cómo voy este mes?”.';
+    suggestedNextQuestion = '¿Quieres registrar un gasto o revisar tu resumen del mes?';
+  } else if (text.includes('como voy') || text.includes('cuanto gaste') || text.includes('cuanto he gastado') || text.includes('resumen') || text.includes('balance')) {
+    intent = 'query_summary';
+    summary = await getLocalMonthlySummary(uid);
+    replyToUser = `Listo, en este mes llevas ${formatCOP(summary.totalExpenses)} en gastos y ${formatCOP(summary.totalIncome)} en ingresos. Tu balance neto es de ${formatCOP(summary.balance)}.`;
+    suggestedNextQuestion = '';
+  } else {
+    const type = inferTransactionType(message);
+    const amount = normalizeAmount(message);
+
+    if (type && amount > 0) {
+      const accounts = await ensureLocalAccounts(uid);
+      const account = accounts.find((item) => normalizeText(item.name) === 'efectivo') || accounts[0];
+
+      if (account) {
+        const description = inferDescription(message);
+        const created = await addTransaction(uid, {
+          type,
+          amount,
+          currency: 'COP',
+          category: inferCategory(message, type),
+          accountId: account.id,
+          accountName: account.name,
+          description,
+          date: new Date(),
+          rawText: message,
+          source: 'bot',
+          confidence: 0.8,
+        });
+
+        intent = 'create_transaction';
+        transactionId = created.id;
+        replyToUser = type === 'income'
+          ? `Listo, registré ese ingreso por ${formatCOP(amount)}.`
+          : `Listo, registré ese gasto por ${formatCOP(amount)}.`;
+        suggestedNextQuestion = '¿Quieres ver el resumen del mes?';
+      } else {
+        intent = 'clarify';
+        replyToUser = 'Entendí el movimiento, pero no encontré una cuenta disponible para guardarlo. Revisa tus cuentas e inténtalo de nuevo.';
+        suggestedNextQuestion = '¿Quieres revisar tus cuentas?';
+      }
+    }
+  }
+
+  await addChatMessage(uid, {
+    text: replyToUser,
+    sender: 'bot',
+    emotionalTone: 'neutral',
+    suggestedNextQuestion,
+    transactionId,
+    summary,
+    intent,
+  } as any);
 }
 
 export function ChatPage({ embedded = false }: ChatPageProps) {
@@ -203,6 +382,22 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
         details: error?.details,
         raw: error,
       });
+
+      if (shouldUseLocalFallback(error)) {
+        try {
+          console.warn('Using local chat fallback because callable failed:', error?.code || error?.message || error);
+          await runLocalChatFallback(user.uid, finalMessage, Boolean(imageData?.base64));
+          return;
+        } catch (fallbackError: any) {
+          console.error('Local chat fallback failed:', {
+            code: fallbackError?.code,
+            message: fallbackError?.message,
+            details: fallbackError?.details,
+            raw: fallbackError,
+          });
+        }
+      }
+
       setChatError(getFriendlyChatError(error));
     } finally {
       setLoading(false);
