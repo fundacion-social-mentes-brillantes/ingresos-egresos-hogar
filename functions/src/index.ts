@@ -7,7 +7,7 @@ import { startOfMonth, endOfMonth, subDays, startOfDay, format } from 'date-fns'
 admin.initializeApp();
 
 const DEEPSEEK_API_KEY = defineSecret('DEEPSEEK_API_KEY');
-const PUBLIC_CALLABLE_OPTIONS = { invoker: 'public' as const };
+const PUBLIC_CALLABLE_OPTIONS = { invoker: 'public' as const, cors: true };
 
 type BotIntent =
   | 'create_transaction'
