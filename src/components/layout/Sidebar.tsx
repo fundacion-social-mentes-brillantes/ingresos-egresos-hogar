@@ -8,6 +8,7 @@ import {
   LogOut,
   TrendingUp,
   FileSpreadsheet,
+  HandCoins,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -15,6 +16,7 @@ const navItems = [
   { to: '/dashboard',     label: 'Inicio',        icon: LayoutDashboard  },
   { to: '/chat',          label: 'Chat',           icon: MessageSquare    },
   { to: '/transactions',  label: 'Movimientos',    icon: ArrowLeftRight   },
+  { to: '/debts',         label: 'Deudas',         icon: HandCoins        },
   { to: '/import',        label: 'Importar',       icon: FileSpreadsheet  },
   { to: '/settings',      label: 'Config.',        icon: Settings         },
 ];
@@ -42,7 +44,7 @@ export function Sidebar() {
         </div>
       </div>
 
-      <nav className="flex-1 p-4 space-y-1">
+      <nav className="flex-1 p-4 space-y-1 overflow-y-auto custom-scrollbar">
         {navItems.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
@@ -85,15 +87,16 @@ export function Sidebar() {
 }
 
 export function BottomNav() {
+  const mobileItems = navItems.slice(0, 5);
   return (
     <nav className="fixed bottom-0 left-0 right-0 bg-slate-950/90 backdrop-blur-xl border-t border-slate-700/50 flex md:hidden z-50 pb-[env(safe-area-inset-bottom)] shadow-2xl">
-      {navItems.map(({ to, label, icon: Icon }) => (
+      {mobileItems.map(({ to, label, icon: Icon }) => (
         <NavLink
           key={to}
           to={to}
           className={({ isActive }) =>
             clsx(
-              'flex-1 flex h-16 flex-col items-center justify-center gap-1 py-2 text-[11px] font-medium transition-all duration-200',
+              'flex-1 flex h-16 flex-col items-center justify-center gap-1 py-2 text-[10px] font-medium transition-all duration-200',
               isActive ? 'text-blue-400' : 'text-slate-500'
             )
           }
