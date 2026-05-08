@@ -24,16 +24,16 @@ const mobileItems = [
 
 export function MobileNav() {
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-50 overflow-x-auto border-t border-slate-700/50 bg-slate-950/90 pb-[env(safe-area-inset-bottom)] shadow-2xl backdrop-blur-xl md:hidden">
-      <div className="flex min-w-max">
+    <nav className="fixed bottom-0 left-0 right-0 z-50 overflow-x-auto border-t border-slate-700/50 bg-slate-950/85 px-2 pb-[env(safe-area-inset-bottom)] shadow-2xl backdrop-blur-2xl md:hidden">
+      <div className="flex min-w-max gap-1 py-2">
         {mobileItems.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
             to={to}
             className={({ isActive }) =>
               clsx(
-                'flex h-16 min-w-[4.75rem] flex-col items-center justify-center gap-1 px-2 py-2 text-[10px] font-medium transition-all duration-200',
-                isActive ? 'bg-blue-500/5 text-blue-400' : 'text-slate-500'
+                'flex h-14 min-w-[4.65rem] flex-col items-center justify-center gap-1 rounded-2xl px-2 py-2 text-[10px] font-bold transition-all duration-200',
+                isActive ? 'border border-blue-400/25 bg-blue-500/15 text-blue-200 shadow-lg shadow-blue-500/10' : 'text-slate-500'
               )
             }
           >

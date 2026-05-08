@@ -1,5 +1,7 @@
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
+import { useUserProfile } from '../../hooks/useUserProfile';
+import { ProfileAvatar } from '../visual/ProfileAvatar';
 import {
   LayoutDashboard,
   MessageSquare,
@@ -11,22 +13,24 @@ import {
   HandCoins,
   BarChart3,
   ShieldCheck,
+  Sparkles,
 } from 'lucide-react';
 import clsx from 'clsx';
 
 const navItems = [
   { to: '/dashboard',     label: 'Inicio',        icon: LayoutDashboard  },
-  { to: '/chat',          label: 'Chat',           icon: MessageSquare    },
+  { to: '/chat',          label: 'Copiloto',       icon: MessageSquare    },
   { to: '/transactions',  label: 'Movimientos',    icon: ArrowLeftRight   },
   { to: '/debts',         label: 'Deudas',         icon: HandCoins        },
   { to: '/import',        label: 'Importar',       icon: FileSpreadsheet  },
   { to: '/reports',       label: 'Reportes',       icon: BarChart3        },
   { to: '/backup',        label: 'Respaldo',       icon: ShieldCheck      },
-  { to: '/settings',      label: 'Config.',        icon: Settings         },
+  { to: '/settings',      label: 'Ajustes',        icon: Settings         },
 ];
 
 export function Sidebar() {
-  const { user, logout } = useAuth();
+  const { logout } = useAuth();
+  const { displayName, email, photo, initials } = useUserProfile();
   const navigate = useNavigate();
 
   const handleLogout = async () => {
@@ -35,80 +39,71 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="fixed left-0 top-0 h-screen w-64 glass border-r border-slate-700/40 flex flex-col z-40 hidden md:flex">
-      <div className="p-6 border-b border-slate-700/40">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/30">
-            <TrendingUp className="w-5 h-5 text-white" />
+    <aside className="premium-panel fixed left-0 top-0 z-40 hidden h-screen w-64 flex-col border-r border-slate-700/40 md:flex">
+      <div className="p-5">
+        <div className="lux-hero relative rounded-[1.35rem] p-4">
+          <div className="flex items-center gap-3">
+            <div className="premium-icon h-12 w-12 text-blue-200">
+              <TrendingUp className="h-6 w-6" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-black uppercase tracking-[0.22em] text-blue-300">Luxury cockpit</p>
+              <p className="mt-1 text-sm font-black leading-tight text-slate-100">Ingresos &</p>
+              <p className="text-sm font-black leading-tight text-slate-100">Egresos Hogar</p>
+            </div>
           </div>
-          <div>
-            <p className="font-bold text-slate-100 text-sm leading-tight">Ingresos &</p>
-            <p className="font-bold text-slate-100 text-sm leading-tight">Egresos Hogar</p>
+          <div className="mt-4 flex items-center gap-2 rounded-2xl border border-blue-400/20 bg-blue-400/10 px-3 py-2 text-[11px] font-bold text-blue-200">
+            <Sparkles className="h-3.5 w-3.5" />
+            Control familiar premium
           </div>
         </div>
       </div>
 
-      <nav className="flex-1 p-4 space-y-1 overflow-y-auto custom-scrollbar">
+      <nav className="custom-scrollbar flex-1 space-y-1 overflow-y-auto px-4 pb-4">
         {navItems.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
             to={to}
             className={({ isActive }) =>
               clsx(
-                'flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium transition-all duration-200',
+                'group relative flex items-center gap-3 overflow-hidden rounded-2xl px-4 py-3 text-sm font-bold transition-all duration-200',
                 isActive
-                  ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30'
-                  : 'text-slate-400 hover:text-slate-100 hover:bg-slate-700/50'
+                  ? 'border border-blue-400/30 bg-blue-500/15 text-blue-100 shadow-lg shadow-blue-500/10'
+                  : 'text-slate-400 hover:bg-white/[0.055] hover:text-slate-100'
               )
             }
           >
-            <Icon className="w-4 h-4" />
-            {label}
+            {({ isActive }) => (
+              <>
+                <span className={clsx('absolute left-0 top-1/2 h-8 w-1 -translate-y-1/2 rounded-r-full transition-all', isActive ? 'bg-blue-400 opacity-100' : 'bg-transparent opacity-0')} />
+                <span className={clsx('flex h-9 w-9 items-center justify-center rounded-xl border transition-all', isActive ? 'border-blue-400/30 bg-blue-400/15 text-blue-200' : 'border-slate-700/40 bg-slate-900/30 text-slate-500 group-hover:border-slate-500/40 group-hover:text-slate-200')}>
+                  <Icon className="h-4 w-4" />
+                </span>
+                <span>{label}</span>
+              </>
+            )}
           </NavLink>
         ))}
       </nav>
 
-      <div className="p-4 border-t border-slate-700/40">
-        <div className="flex items-center gap-3 px-2 mb-3">
-          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-sm font-bold text-white">
-            {user?.displayName?.[0]?.toUpperCase() ?? 'U'}
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-slate-200 truncate">{user?.displayName ?? 'Usuario'}</p>
-            <p className="text-xs text-slate-500 truncate">{user?.email}</p>
+      <div className="border-t border-slate-700/40 p-4">
+        <div className="mb-3 rounded-3xl border border-slate-700/40 bg-slate-900/40 p-3">
+          <div className="flex items-center gap-3">
+            <ProfileAvatar src={photo} initials={initials} size="md" />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-black text-slate-100">{displayName}</p>
+              <p className="truncate text-xs text-slate-500">{email}</p>
+            </div>
           </div>
         </div>
         <button
           onClick={handleLogout}
-          className="w-full flex items-center gap-2 px-4 py-2 rounded-xl text-sm text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-all duration-200"
+          className="flex w-full items-center justify-center gap-2 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm font-bold text-red-300 transition-all duration-200 hover:border-red-400/40 hover:bg-red-500/15"
         >
-          <LogOut className="w-4 h-4" />
-          Cerrar sesión
+          <LogOut className="h-4 w-4" />
+          Cerrar sesion
         </button>
       </div>
     </aside>
-  );
-}
-
-export function BottomNav() {
-  const mobileItems = navItems.slice(0, 5);
-  return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-slate-950/90 backdrop-blur-xl border-t border-slate-700/50 flex md:hidden z-50 pb-[env(safe-area-inset-bottom)] shadow-2xl">
-      {mobileItems.map(({ to, label, icon: Icon }) => (
-        <NavLink
-          key={to}
-          to={to}
-          className={({ isActive }) =>
-            clsx(
-              'flex-1 flex h-16 flex-col items-center justify-center gap-1 py-2 text-[10px] font-medium transition-all duration-200',
-              isActive ? 'text-blue-400' : 'text-slate-500'
-            )
-          }
-        >
-          <Icon className="w-5 h-5" />
-          {label}
-        </NavLink>
-      ))}
-    </nav>
   );
 }

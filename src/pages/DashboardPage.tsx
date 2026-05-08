@@ -1,221 +1,247 @@
 import { useTransactions, useFinancialSummary, useLast7Days } from '../hooks/useTransactions';
 import { StatCard } from '../components/ui/Card';
 import { formatCOP } from '../types';
-import { useAuth } from '../contexts/AuthContext';
+import { useUserProfile } from '../hooks/useUserProfile';
 import { useDebts } from '../hooks/useDebts';
-import { ChatPage } from './ChatPage';
+import { ChatPage } from './ChatPagePro';
+import { AccountBrandMark } from '../components/visual/AccountBrandMark';
+import { EmptyState } from '../components/visual/EmptyState';
 import {
   TrendingUp, TrendingDown, Wallet, Activity,
-  Tag, Calendar, Loader2, Info, HandCoins, AlertTriangle
+  Tag, Calendar, Loader2, Info, HandCoins, AlertTriangle, Sparkles, ArrowUpRight
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 
 export function DashboardPage() {
-  const { user } = useAuth();
-  const { transactions, loading } = useTransactions();
-  const summary   = useFinancialSummary(transactions);
-  const last7     = useLast7Days(transactions);
+  const { displayName } = useUserProfile();
+  const { transactions, accounts, loading } = useTransactions();
+  const summary = useFinancialSummary(transactions);
+  const last7 = useLast7Days(transactions);
   const { debts, summary: debtSummary } = useDebts();
-  const last7Total = last7.reduce((s, t) => s + t.amount, 0);
+  const last7Total = last7.reduce((sum, tx) => sum + tx.amount, 0);
 
   const topCategory = Object.entries(summary.byCategory).sort((a, b) => b[1] - a[1])[0];
   const expenseBars = Object.entries(summary.byCategory).sort((a, b) => b[1] - a[1]).slice(0, 5);
   const openDebts = debts.filter((debt) => debt.status !== 'paid').slice(0, 4);
+  const accountPreview = accounts.filter((account) => account.active).slice(0, 4);
+  const firstName = displayName.split(' ')[0] || 'Usuario';
   const today = format(new Date(), "EEEE d 'de' MMMM", { locale: es });
 
   if (loading && transactions.length === 0) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+      <div className="flex h-64 items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-blue-400" />
       </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 pb-8">
-      {/* LEFT COLUMN: CHAT (PROTAGONIST) */}
-      <div className="lg:col-span-7 xl:col-span-8 flex flex-col h-[600px] lg:h-[calc(100vh-8rem)]">
-        <div className="mb-4">
-          <h1 className="text-2xl font-bold text-slate-100">
-            Hola, {user?.displayName?.split(' ')[0]} 👋
-          </h1>
-          <p className="text-slate-400 text-sm capitalize">{today}</p>
-        </div>
-        
-        <div className="flex-1 glass rounded-3xl overflow-hidden border border-slate-700/40 flex flex-col shadow-2xl shadow-blue-500/5">
-          <ChatPage embedded={true} />
+    <div className="grid grid-cols-1 gap-6 pb-8 lg:grid-cols-12">
+      <div className="flex h-[680px] flex-col lg:col-span-7 lg:h-[calc(100vh-8rem)] xl:col-span-8">
+        <section className="lux-hero relative mb-4 p-5 sm:p-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <p className="lux-kicker">Centro financiero familiar</p>
+              <h1 className="lux-heading mt-2 text-3xl sm:text-4xl">Hola, {firstName}</h1>
+              <p className="lux-subtle mt-2 text-sm capitalize">{today}</p>
+            </div>
+            <div className="inline-flex items-center gap-2 rounded-2xl border border-blue-400/25 bg-blue-400/10 px-4 py-3 text-sm font-bold text-blue-100">
+              <Sparkles className="h-4 w-4 text-cyan-300" />
+              Copiloto activo
+            </div>
+          </div>
+        </section>
+
+        <div className="premium-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-[1.75rem] border border-slate-700/40">
+          <ChatPage embedded />
         </div>
       </div>
 
-      {/* RIGHT COLUMN: STATS & SUMMARY */}
-      <div className="lg:col-span-5 xl:col-span-4 space-y-6 overflow-y-auto lg:h-[calc(100vh-8rem)] pr-1 custom-scrollbar">
-        {/* Quick Stats Grid */}
+      <aside className="custom-scrollbar space-y-5 overflow-y-auto pr-1 lg:col-span-5 lg:h-[calc(100vh-8rem)] xl:col-span-4">
         <div className="grid grid-cols-2 gap-4">
           <StatCard
             label="Balance"
             value={formatCOP(summary.balance)}
-            icon={<Wallet className="w-4 h-4" />}
+            icon={<Wallet className="h-4 w-4" />}
             color={summary.balance >= 0 ? 'blue' : 'red'}
+            sub="Mes actual"
           />
           <StatCard
-            label="7 días"
+            label="7 dias"
             value={formatCOP(last7Total)}
-            icon={<Activity className="w-4 h-4" />}
+            icon={<Activity className="h-4 w-4" />}
             color="amber"
+            sub="Gasto reciente"
           />
         </div>
 
-        {/* Debt cards */}
         <div className="grid grid-cols-2 gap-4">
-          <div className="glass rounded-2xl p-4 border border-green-500/20 bg-green-500/5">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-medium text-green-400 uppercase tracking-wider">Te deben</span>
-              <HandCoins className="w-4 h-4 text-green-400" />
+          <div className="metric-card border-green-500/20 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-black uppercase tracking-[0.16em] text-green-300">Te deben</span>
+              <HandCoins className="h-4 w-4 text-green-300" />
             </div>
-            <p className="text-lg font-bold text-slate-100">{formatCOP(debtSummary.receivable)}</p>
+            <p className="text-xl font-black text-slate-100">{formatCOP(debtSummary.receivable)}</p>
           </div>
-          <div className="glass rounded-2xl p-4 border border-red-500/20 bg-red-500/5">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-medium text-red-400 uppercase tracking-wider">Debes</span>
-              <AlertTriangle className="w-4 h-4 text-red-400" />
+          <div className="metric-card border-red-500/20 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-black uppercase tracking-[0.16em] text-red-300">Debes</span>
+              <AlertTriangle className="h-4 w-4 text-red-300" />
             </div>
-            <p className="text-lg font-bold text-slate-100">{formatCOP(debtSummary.payable)}</p>
+            <p className="text-xl font-black text-slate-100">{formatCOP(debtSummary.payable)}</p>
           </div>
         </div>
 
-        {/* Income/Expense Cards */}
         <div className="grid grid-cols-1 gap-4">
-          <div className="glass rounded-2xl p-4 border border-green-500/20 bg-green-500/5">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-medium text-green-400 uppercase tracking-wider">Ingresos Mes</span>
-              <TrendingUp className="w-4 h-4 text-green-400" />
+          <div className="metric-card border-green-500/20 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-black uppercase tracking-[0.16em] text-green-300">Ingresos mes</span>
+              <TrendingUp className="h-4 w-4 text-green-300" />
             </div>
-            <p className="text-xl font-bold text-slate-100">{formatCOP(summary.totalIncome)}</p>
+            <p className="text-2xl font-black text-slate-100">{formatCOP(summary.totalIncome)}</p>
           </div>
-          
-          <div className="glass rounded-2xl p-4 border border-red-500/20 bg-red-500/5">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-medium text-red-400 uppercase tracking-wider">Gastos Mes</span>
-              <TrendingDown className="w-4 h-4 text-red-400" />
+          <div className="metric-card border-red-500/20 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-black uppercase tracking-[0.16em] text-red-300">Gastos mes</span>
+              <TrendingDown className="h-4 w-4 text-red-300" />
             </div>
-            <p className="text-xl font-bold text-slate-100">{formatCOP(summary.totalExpenses)}</p>
+            <p className="text-2xl font-black text-slate-100">{formatCOP(summary.totalExpenses)}</p>
           </div>
         </div>
 
-        {/* Category bars */}
-        <div className="glass rounded-2xl p-5 border border-slate-700/30">
-          <div className="flex items-center gap-2 mb-4">
-            <Activity className="w-4 h-4 text-blue-400" />
-            <h2 className="text-sm font-semibold text-slate-300">Gastos por categoría</h2>
+        <section className="lux-card p-5">
+          <div className="mb-4 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Wallet className="h-4 w-4 text-blue-300" />
+              <h2 className="text-sm font-black text-slate-100">Cuentas</h2>
+            </div>
+            <span className="text-xs font-bold text-slate-500">{accountPreview.length} activas</span>
+          </div>
+          {accountPreview.length > 0 ? (
+            <div className="space-y-3">
+              {accountPreview.map((account) => (
+                <div key={account.id} className="flex items-center justify-between gap-3 rounded-2xl border border-slate-700/40 bg-slate-900/35 p-3">
+                  <AccountBrandMark type={account.type} name={account.name} size="sm" showLabel />
+                  <p className="shrink-0 text-sm font-black text-blue-200">{formatCOP(account.currentBalance)}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState asset="categories" title="Sin cuentas visibles" description="Cuando tengas cuentas activas, apareceran aqui con su identidad visual." className="min-h-44 p-4" />
+          )}
+        </section>
+
+        <section className="lux-card p-5">
+          <div className="mb-4 flex items-center gap-2">
+            <Activity className="h-4 w-4 text-blue-300" />
+            <h2 className="text-sm font-black text-slate-100">Gastos por categoria</h2>
           </div>
           {expenseBars.length > 0 ? (
-            <div className="space-y-3">
+            <div className="space-y-4">
               {expenseBars.map(([category, amount]) => (
                 <div key={category}>
-                  <div className="flex items-center justify-between text-xs mb-1">
-                    <span className="text-slate-300 truncate">{category}</span>
-                    <span className="text-slate-400">{formatCOP(amount)}</span>
+                  <div className="mb-2 flex items-center justify-between gap-3 text-xs">
+                    <span className="truncate font-bold text-slate-300">{category}</span>
+                    <span className="font-black text-slate-100">{formatCOP(amount)}</span>
                   </div>
-                  <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
-                    <div className="h-full bg-gradient-to-r from-red-500 to-amber-400 rounded-full" style={{ width: `${summary.totalExpenses > 0 ? Math.min(100, (amount / summary.totalExpenses) * 100) : 0}%` }} />
+                  <div className="h-2.5 overflow-hidden rounded-full bg-slate-800/70">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-red-400 via-amber-300 to-blue-400"
+                      style={{ width: `${summary.totalExpenses > 0 ? Math.min(100, (amount / summary.totalExpenses) * 100) : 0}%` }}
+                    />
                   </div>
                 </div>
               ))}
             </div>
           ) : (
-            <p className="text-slate-500 text-xs italic">Aún no hay categorías. Escribe un gasto en el chat y aquí aparecerá el análisis.</p>
+            <EmptyState asset="categories" title="Aun sin categorias" description="Registra un gasto desde el chat y esta zona se convertira en lectura visual de tus habitos." className="min-h-48 p-5" />
           )}
-        </div>
+        </section>
 
-        {/* Top Category */}
-        <div className="glass rounded-2xl p-5 border border-slate-700/30">
-          <div className="flex items-center gap-2 mb-4">
-            <Tag className="w-4 h-4 text-blue-400" />
-            <h2 className="text-sm font-semibold text-slate-300">Mayor gasto</h2>
+        <section className="lux-card p-5">
+          <div className="mb-4 flex items-center gap-2">
+            <Tag className="h-4 w-4 text-blue-300" />
+            <h2 className="text-sm font-black text-slate-100">Mayor gasto</h2>
           </div>
           {topCategory ? (
             <div>
-              <p className="text-lg font-bold text-slate-100">{topCategory[0]}</p>
-              <p className="text-blue-400 font-semibold mt-0.5">{formatCOP(topCategory[1])}</p>
-              <div className="mt-3 bg-slate-700/30 rounded-full h-1.5 overflow-hidden">
+              <p className="text-2xl font-black text-slate-100">{topCategory[0]}</p>
+              <p className="mt-1 font-black text-blue-300">{formatCOP(topCategory[1])}</p>
+              <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-800/70">
                 <div
-                  className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full"
-                  style={{
-                    width: summary.totalExpenses > 0
-                      ? `${Math.min(100, (topCategory[1] / summary.totalExpenses) * 100)}%`
-                      : '0%'
-                  }}
+                  className="h-full rounded-full bg-gradient-to-r from-blue-400 to-violet-400"
+                  style={{ width: summary.totalExpenses > 0 ? `${Math.min(100, (topCategory[1] / summary.totalExpenses) * 100)}%` : '0%' }}
                 />
               </div>
             </div>
           ) : (
-            <p className="text-slate-500 text-xs italic">Sin gastos registrados</p>
+            <p className="text-sm text-slate-500">Sin gastos registrados todavia.</p>
           )}
-        </div>
+        </section>
 
-        {/* Open debts */}
-        <div className="glass rounded-2xl p-5 border border-slate-700/30">
-          <div className="flex items-center gap-2 mb-4">
-            <HandCoins className="w-4 h-4 text-blue-400" />
-            <h2 className="text-sm font-semibold text-slate-300">Deudas pendientes</h2>
+        <section className="lux-card p-5">
+          <div className="mb-4 flex items-center gap-2">
+            <HandCoins className="h-4 w-4 text-blue-300" />
+            <h2 className="text-sm font-black text-slate-100">Deudas pendientes</h2>
           </div>
           {openDebts.length > 0 ? (
             <ul className="space-y-3">
               {openDebts.map((debt) => {
                 const remaining = Math.max(0, debt.amountOriginal - debt.amountPaid);
                 return (
-                  <li key={debt.id} className="flex items-center justify-between gap-2 border-b border-slate-700/30 pb-2 last:border-0 last:pb-0">
+                  <li key={debt.id} className="flex items-center justify-between gap-3 rounded-2xl border border-slate-700/40 bg-slate-900/35 p-3">
                     <div className="min-w-0">
-                      <p className="text-sm text-slate-200 truncate font-medium">{debt.personName}</p>
-                      <p className="text-[10px] text-slate-500 uppercase">{debt.direction === 'receivable' ? 'Te debe' : 'Tú debes'}</p>
+                      <p className="truncate text-sm font-black text-slate-100">{debt.personName}</p>
+                      <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">{debt.direction === 'receivable' ? 'Te debe' : 'Tu debes'}</p>
                     </div>
-                    <span className={debt.direction === 'receivable' ? 'text-green-400 text-sm font-bold shrink-0' : 'text-red-400 text-sm font-bold shrink-0'}>{formatCOP(remaining)}</span>
+                    <span className={debt.direction === 'receivable' ? 'shrink-0 text-sm font-black text-green-300' : 'shrink-0 text-sm font-black text-red-300'}>{formatCOP(remaining)}</span>
                   </li>
                 );
               })}
             </ul>
           ) : (
-            <p className="text-slate-500 text-xs text-center py-2 italic">Sin deudas pendientes. Puedes decir: “Juan me debe 50 mil”.</p>
+            <EmptyState asset="debts" title="Sin deudas abiertas" description="Puedes decirle al copiloto: Juan me debe 50 mil, y lo deja ordenado." className="min-h-48 p-5" />
           )}
-        </div>
+        </section>
 
-        {/* Mini History */}
-        <div className="glass rounded-2xl p-5 border border-slate-700/30">
-          <div className="flex items-center justify-between mb-4">
+        <section className="lux-card p-5">
+          <div className="mb-4 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <Calendar className="w-4 h-4 text-blue-400" />
-              <h2 className="text-sm font-semibold text-slate-300">Últimos movimientos</h2>
+              <Calendar className="h-4 w-4 text-blue-300" />
+              <h2 className="text-sm font-black text-slate-100">Ultimos movimientos</h2>
             </div>
+            <ArrowUpRight className="h-4 w-4 text-slate-500" />
           </div>
-          <ul className="space-y-3">
-            {transactions.slice(0, 4).map(tx => (
-              <li key={tx.id} className="flex items-center justify-between gap-2 border-b border-slate-700/30 pb-2 last:border-0 last:pb-0">
-                <div className="flex flex-col min-w-0">
-                  <span className="text-sm text-slate-200 truncate font-medium">{tx.description}</span>
-                  <span className="text-[10px] text-slate-500 uppercase">{tx.category}</span>
-                </div>
-                <span className={`text-sm font-bold shrink-0 ${
-                  tx.type === 'income' ? 'text-green-400' : 'text-red-400'
-                }`}>
-                  {tx.type === 'income' ? '+' : '-'}{formatCOP(tx.amount)}
-                </span>
-              </li>
-            ))}
-            {transactions.length === 0 && (
-              <p className="text-slate-500 text-xs text-center py-2 italic">Empieza a hablar con el bot para ver tus movimientos aquí.</p>
-            )}
-          </ul>
-        </div>
-        
-        {/* Tip/Info */}
-        <div className="p-4 rounded-2xl bg-blue-500/10 border border-blue-500/20 flex gap-3 items-start">
-          <Info className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" />
-          <p className="text-xs text-blue-200/70 leading-relaxed">
-            Puedes preguntarme cosas como "analiza mis fugas", "quién me debe", "corrige ese gasto a 80 mil" o "descargar Excel".
+          {transactions.length > 0 ? (
+            <ul className="space-y-3">
+              {transactions.slice(0, 4).map((tx) => (
+                <li key={tx.id} className="flex items-center justify-between gap-3 rounded-2xl border border-slate-700/40 bg-slate-900/35 p-3">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <AccountBrandMark name={tx.accountName} size="sm" />
+                    <div className="min-w-0">
+                      <span className="block truncate text-sm font-bold text-slate-100">{tx.description}</span>
+                      <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">{tx.category}</span>
+                    </div>
+                  </div>
+                  <span className={`shrink-0 text-sm font-black ${tx.type === 'income' ? 'text-green-300' : 'text-red-300'}`}>
+                    {tx.type === 'income' ? '+' : '-'}{formatCOP(tx.amount)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyState asset="transactions" title="Sin movimientos aun" description="Habla con el copiloto para registrar el primer ingreso o gasto." className="min-h-48 p-5" />
+          )}
+        </section>
+
+        <div className="flex items-start gap-3 rounded-3xl border border-blue-500/20 bg-blue-500/10 p-4">
+          <Info className="mt-0.5 h-5 w-5 shrink-0 text-blue-300" />
+          <p className="text-xs leading-relaxed text-blue-100/80">
+            Prueba: "analiza mis fugas", "quien me debe", "corrige ese gasto a 80 mil" o "descargar Excel".
           </p>
         </div>
-      </div>
+      </aside>
     </div>
   );
 }

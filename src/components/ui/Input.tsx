@@ -26,9 +26,10 @@ export function Input({ label, error, icon, className, id, ...props }: InputProp
           {...props}
           className={clsx(
             'w-full rounded-xl bg-slate-800/60 border border-slate-600/50',
+            'lux-input',
             'text-slate-100 placeholder:text-slate-500',
             'px-4 py-2.5 text-sm',
-            'focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500/50',
+            'focus:outline-none',
             'transition-all duration-200',
             icon && 'pl-10',
             error && 'border-red-500/50',
@@ -61,8 +62,9 @@ export function Select({ label, error, options, className, id, ...props }: Selec
         {...props}
         className={clsx(
           'w-full rounded-xl bg-slate-800/60 border border-slate-600/50',
+          'lux-input',
           'text-slate-100 px-4 py-2.5 text-sm',
-          'focus:outline-none focus:ring-2 focus:ring-blue-500/50',
+          'focus:outline-none',
           'transition-all duration-200',
           error && 'border-red-500/50',
           className

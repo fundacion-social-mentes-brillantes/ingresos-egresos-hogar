@@ -17,10 +17,10 @@ export function AppLayout({ children }: AppLayoutProps) {
   }, []);
 
   return (
-    <div className="min-h-screen bg-surface-900">
+    <div className="app-shell">
       <Sidebar />
       <main className="md:ml-64 min-h-screen pb-20 md:pb-0">
-        <div className="max-w-7xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
+        <div className="mx-auto max-w-7xl px-3 py-4 sm:px-5 sm:py-6">
           {children}
         </div>
       </main>

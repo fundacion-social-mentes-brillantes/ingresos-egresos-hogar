@@ -34,6 +34,9 @@ export interface UserProfile {
   email: string;
   createdAt: Date;
   defaultCurrency: 'COP';
+  photoURL?: string | null;
+  photoDataUrl?: string | null;
+  photoRemoved?: boolean;
 }
 
 export interface Account {

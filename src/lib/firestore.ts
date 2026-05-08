@@ -136,6 +136,10 @@ export async function createUserProfile(uid: string, data: Omit<UserProfile, 'ui
   );
 }
 
+export async function updateUserProfile(uid: string, data: Partial<Omit<UserProfile, 'uid' | 'createdAt'>>) {
+  return setDoc(userRef(uid), cleanUndefinedFields({ ...data, updatedAt: serverTimestamp() }), { merge: true });
+}
+
 // -- Accounts ----------------------------------------------------------------
 export async function getAccounts(uid: string): Promise<Account[]> {
   const snap = await getDocs(query(accCol(uid), orderBy('createdAt', 'asc')));

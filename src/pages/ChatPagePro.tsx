@@ -20,6 +20,7 @@ import {
   updateTransaction,
 } from '../lib/firestore';
 import { getAiMemory, memoryToContext, updateAiMemory } from '../lib/aiMemory';
+import { EmptyState } from '../components/visual/EmptyState';
 import type { Account, AiInsight, AiMemoryProfile, ChatMessage, Debt, DebtDirection, FinancialSummary, Transaction, TransactionType } from '../types';
 import { DEFAULT_ACCOUNTS, formatCOP } from '../types';
 
@@ -493,8 +494,27 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
   };
 
   return (
-    <div className={`flex flex-col h-full min-h-0 bg-slate-900/40 relative ${embedded ? '' : 'max-w-5xl mx-auto w-full glass rounded-3xl overflow-hidden shadow-2xl'}`}>
-      <div className="px-4 sm:px-6 py-4 border-b border-slate-700/50 flex items-center justify-between bg-slate-800/20">
+    <div className={`relative flex min-h-0 flex-col overflow-hidden ${embedded ? 'h-full bg-transparent' : 'premium-panel mx-auto min-h-[calc(100vh-8rem)] w-full max-w-5xl rounded-[1.75rem] border border-slate-700/40'}`}>
+      <header className="border-b border-slate-700/50 bg-slate-950/35 px-4 py-4 sm:px-6">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="premium-icon h-12 w-12 shrink-0 text-blue-100"><Brain className="h-6 w-6" /></div>
+            <div className="min-w-0">
+              <p className="text-xs font-black uppercase tracking-[0.2em] text-blue-300">Copiloto financiero</p>
+              <h2 className="truncate text-base font-black text-slate-100">DeepSeek Pro Cockpit</h2>
+              <div className="mt-1 flex items-center gap-2">
+                <span className={`status-dot ${isTyping ? 'bg-green-400 text-green-400 animate-pulse' : pendingAction ? 'bg-amber-400 text-amber-400' : 'bg-blue-400 text-blue-400'}`} />
+                <span className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">{isTyping ? 'Pensando...' : pendingAction ? 'Confirmacion pendiente' : 'Modo humano'}</span>
+              </div>
+            </div>
+          </div>
+          <div className="hidden items-center gap-2 rounded-2xl border border-green-400/20 bg-green-400/10 px-3 py-2 text-xs font-black text-green-200 sm:flex">
+            <ShieldCheck className="h-4 w-4" />
+            Datos protegidos
+          </div>
+        </div>
+      </header>
+      <div className="hidden">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20"><Brain className="w-6 h-6 text-white" /></div>
           <div><h2 className="text-sm font-bold text-slate-100">Copiloto Financiero Pro</h2><div className="flex items-center gap-1.5"><div className={`w-2 h-2 rounded-full ${isTyping ? 'bg-green-400 animate-pulse' : 'bg-slate-500'}`} /><span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">{isTyping ? 'Pensando...' : pendingAction ? 'Esperando confirmación' : 'Modo humano'}</span></div></div>
@@ -502,33 +522,41 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
         <ShieldCheck className="h-5 w-5 text-green-400" />
       </div>
 
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-5 space-y-4 custom-scrollbar">
+      <div ref={scrollRef} className="custom-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto p-3 sm:p-5">
+        {messages.length === 0 && !isTyping && (
+          <EmptyState
+            asset="chat"
+            title="Hablame normal. Yo ordeno, pienso y te ayudo."
+            description="Puedo registrar, analizar, detectar fugas, cuidar deudas y acompanarte con claridad financiera."
+            className="chat-empty-replacement h-full min-h-[360px] border-0 bg-transparent"
+          />
+        )}
         {messages.length === 0 && !isTyping && <div className="flex flex-col items-center justify-center h-full text-center p-8"><div className="w-16 h-16 rounded-3xl bg-slate-800/50 flex items-center justify-center mb-4 border border-slate-700/50"><Bot className="w-8 h-8 text-blue-400" /></div><h3 className="text-slate-200 font-semibold">Háblame normal. Yo ordeno, pienso y te ayudo.</h3><p className="text-slate-500 text-sm mt-2 max-w-xs">Puedo registrar, analizar, detectar fugas, cuidar deudas y acompañarte con claridad financiera.</p></div>}
         {messages.map((msg) => (
-          <div key={msg.id} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'} animate-in fade-in slide-in-from-bottom-2 duration-300`}>
-            <div className={`max-w-[92%] sm:max-w-[85%] whitespace-pre-line px-4 py-2.5 rounded-2xl text-sm shadow-sm ${msg.sender === 'user' ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-slate-800 text-slate-100 border border-slate-700/50 rounded-tl-none'}`}>{msg.text}</div>
+          <div key={msg.id} className={`chat-bubble flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
+            <div className={`max-w-[92%] whitespace-pre-line px-4 py-3 text-sm leading-relaxed shadow-lg sm:max-w-[85%] ${msg.sender === 'user' ? 'rounded-[1.35rem] rounded-tr-md bg-gradient-to-br from-blue-600 to-violet-600 text-white shadow-blue-500/15' : 'rounded-[1.35rem] rounded-tl-md border border-slate-700/50 bg-slate-900/70 text-slate-100 shadow-black/10'}`}>{msg.text}</div>
             {msg.sender === 'bot' && (msg.insights?.length || msg.suggestedActions?.length || msg.transactionId || msg.debtId) ? (
-              <div className="w-full max-w-[92%] sm:max-w-[85%] mt-2 space-y-2">
-                {msg.insights?.slice(0, 3).map((insight, index) => <div key={`${msg.id}-insight-${index}`} className="rounded-2xl border border-blue-500/20 bg-blue-500/10 px-3 py-2 text-xs text-blue-100"><div className="flex items-center gap-2 font-bold"><Lightbulb className="h-3.5 w-3.5" /> {insight.title}</div><p className="mt-1 text-blue-100/80">{insight.detail}</p></div>)}
-                {msg.suggestedActions?.slice(0, 3).map((action, index) => <button key={`${msg.id}-action-${index}`} onClick={() => handleSend(action)} className="mr-2 rounded-full border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800">{action}</button>)}
-                {msg.transactionId && <div className="rounded-2xl border border-green-500/30 bg-green-500/10 px-3 py-2 text-xs text-green-100 flex items-center gap-2"><CheckCircle2 className="h-4 w-4" /> Movimiento registrado</div>}
-                {msg.debtId && <div className="rounded-2xl border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-xs text-blue-100 flex items-center gap-2"><CheckCircle2 className="h-4 w-4" /> Deuda actualizada</div>}
+              <div className="mt-2 w-full max-w-[92%] space-y-2 sm:max-w-[85%]">
+                {msg.insights?.slice(0, 3).map((insight, index) => <div key={`${msg.id}-insight-${index}`} className="rounded-2xl border border-blue-500/20 bg-blue-500/10 px-3 py-2 text-xs text-blue-100"><div className="flex items-center gap-2 font-black"><Lightbulb className="h-3.5 w-3.5" /> {insight.title}</div><p className="mt-1 text-blue-100/80">{insight.detail}</p></div>)}
+                {msg.suggestedActions?.slice(0, 3).map((action, index) => <button key={`${msg.id}-action-${index}`} onClick={() => handleSend(action)} className="mr-2 rounded-full border border-slate-700/60 bg-slate-900/50 px-3 py-1.5 text-xs font-bold text-slate-300 transition hover:border-blue-400/40 hover:bg-blue-500/10">{action}</button>)}
+                {msg.transactionId && <div className="flex items-center gap-2 rounded-2xl border border-green-500/30 bg-green-500/10 px-3 py-2 text-xs font-black text-green-100"><CheckCircle2 className="h-4 w-4" /> Movimiento registrado</div>}
+                {msg.debtId && <div className="flex items-center gap-2 rounded-2xl border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-xs font-black text-blue-100"><CheckCircle2 className="h-4 w-4" /> Deuda actualizada</div>}
               </div>
             ) : null}
           </div>
         ))}
         {pendingAction && <div className="rounded-3xl border border-amber-500/40 bg-amber-500/10 p-4 text-amber-50 shadow-lg"><div className="flex items-start gap-3"><AlertCircle className="mt-0.5 h-5 w-5 text-amber-300" /><div><p className="text-sm font-bold">Confirmación requerida</p><p className="mt-1 text-sm text-amber-100">{pendingAction.summaryText}</p></div></div><div className="mt-4 grid grid-cols-2 gap-2"><button onClick={confirmPendingAction} disabled={loading} className="rounded-2xl bg-amber-500 px-4 py-2 text-sm font-bold text-slate-950 hover:bg-amber-400 disabled:opacity-50">Confirmar</button><button onClick={cancelPendingAction} disabled={loading} className="rounded-2xl border border-slate-600 px-4 py-2 text-sm font-bold text-slate-100 hover:bg-slate-800 disabled:opacity-50">Cancelar</button></div></div>}
-        {isTyping && <div className="flex items-center gap-2 text-sm text-slate-400"><Loader2 className="h-4 w-4 animate-spin" /> Estoy pensando con tus datos...</div>}
+        {isTyping && <div className="flex items-center gap-3 text-sm text-slate-400"><div className="flex gap-1 rounded-2xl border border-slate-700/50 bg-slate-900/70 px-4 py-3"><span className="h-2 w-2 animate-bounce rounded-full bg-blue-300 [animation-delay:-0.3s]" /><span className="h-2 w-2 animate-bounce rounded-full bg-cyan-300 [animation-delay:-0.15s]" /><span className="h-2 w-2 animate-bounce rounded-full bg-violet-300" /></div><span>Estoy pensando con tus datos...</span></div>}
       </div>
 
       {chatError && <div className="mx-3 sm:mx-5 mb-3 rounded-2xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-100"><div className="flex items-center gap-2 font-semibold"><AlertCircle className="h-4 w-4" /> {chatError.friendly}</div>{chatError.message && <p className="mt-1 text-xs text-red-200/80">{chatError.message}</p>}{chatError.details && <pre className="mt-2 max-h-28 overflow-auto text-[10px] text-red-200/70 whitespace-pre-wrap">{chatError.details}</pre>}</div>}
       {selectedImage && <div className="mx-3 sm:mx-5 mb-3 flex items-center gap-3 rounded-2xl border border-slate-700 bg-slate-800/80 p-2"><img src={selectedImage.preview} alt="Imagen seleccionada" className="h-14 w-14 rounded-xl object-cover" /><span className="flex-1 text-sm text-slate-300">Imagen lista para analizar</span><button onClick={() => setSelectedImage(null)} className="rounded-full p-2 text-slate-400 hover:bg-slate-700"><X className="h-4 w-4" /></button></div>}
 
-      <div className="border-t border-slate-700/50 bg-slate-950/70 p-3 sm:p-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
+      <footer className="border-t border-slate-700/50 bg-slate-950/60 p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:p-4">
         <div className="mb-2 flex gap-2 overflow-x-auto pb-1">{['cómo voy de verdad este mes', 'analiza mis fugas de dinero', 'ayúdame a ordenar esta semana', 'qué hábito financiero ves en mí', 'deshacer'].map((quick) => <button key={quick} onClick={() => handleSend(quick)} className="shrink-0 rounded-full border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800">{quick}</button>)}</div>
-        <div className="flex items-end gap-2"><input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageSelect} /><button onClick={() => fileInputRef.current?.click()} className="rounded-2xl border border-slate-700 p-3 text-slate-300 hover:bg-slate-800" aria-label="Adjuntar imagen"><Camera className="h-5 w-5" /></button><textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }} placeholder={pendingAction ? 'Escribe confirmo o cancelar...' : 'Ej: me siento desordenado con la plata este mes'} rows={1} className="max-h-32 flex-1 resize-none rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-blue-500" /><button onClick={() => handleSend()} disabled={loading || (!input.trim() && !selectedImage)} className="rounded-2xl bg-blue-600 p-3 text-white hover:bg-blue-500 disabled:opacity-40"><Send className="h-5 w-5" /></button></div>
+        <div className="flex items-end gap-2"><input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageSelect} /><button onClick={() => fileInputRef.current?.click()} className="rounded-2xl border border-slate-700 p-3 text-slate-300 transition hover:bg-slate-800" aria-label="Adjuntar imagen"><Camera className="h-5 w-5" /></button><textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }} placeholder={pendingAction ? 'Escribe confirmo o cancelar...' : 'Ej: me siento desordenado con la plata este mes'} rows={1} className="lux-input max-h-32 flex-1 resize-none rounded-2xl px-4 py-3 text-sm outline-none placeholder:text-slate-500" /><button onClick={() => handleSend()} disabled={loading || (!input.trim() && !selectedImage)} className="premium-button rounded-2xl p-3 text-white transition disabled:opacity-40"><Send className="h-5 w-5" /></button></div>
         <button onClick={handleUndo} className="mt-2 inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300"><RotateCcw className="h-3.5 w-3.5" /> Restaurar último borrado</button>
-      </div>
+      </footer>
     </div>
   );
 }
