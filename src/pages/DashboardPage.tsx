@@ -37,28 +37,28 @@ export function DashboardPage() {
   }
 
   return (
-    <div className="grid grid-cols-1 gap-6 pb-8 lg:grid-cols-12">
-      <div className="flex h-[680px] flex-col lg:col-span-7 lg:h-[calc(100vh-8rem)] xl:col-span-8">
-        <section className="lux-hero relative mb-4 p-5 sm:p-6">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+    <div className="grid min-h-[calc(100dvh-2rem)] grid-cols-1 gap-5 pb-6 lg:grid-cols-12 lg:items-start">
+      <div className="flex min-h-[780px] flex-col lg:col-span-8 lg:h-[calc(100dvh-3rem)] xl:col-span-8">
+        <section className="lux-hero relative mb-3 shrink-0 p-4 sm:p-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="lux-kicker">Centro financiero familiar</p>
-              <h1 className="lux-heading mt-2 text-3xl sm:text-4xl">Hola, {firstName}</h1>
-              <p className="lux-subtle mt-2 text-sm capitalize">{today}</p>
+              <h1 className="lux-heading mt-1 text-2xl sm:text-3xl">Hola, {firstName}</h1>
+              <p className="lux-subtle mt-1 text-sm capitalize">{today}</p>
             </div>
-            <div className="inline-flex items-center gap-2 rounded-2xl border border-blue-400/25 bg-blue-400/10 px-4 py-3 text-sm font-bold text-blue-100">
+            <div className="inline-flex w-fit items-center gap-2 rounded-2xl border border-blue-400/25 bg-blue-400/10 px-4 py-2.5 text-sm font-bold text-blue-100">
               <Sparkles className="h-4 w-4 text-cyan-300" />
               Copiloto activo
             </div>
           </div>
         </section>
 
-        <div className="premium-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-[1.75rem] border border-slate-700/40">
+        <div className="premium-panel flex min-h-[620px] flex-1 flex-col overflow-hidden rounded-[1.75rem] border border-slate-700/40">
           <ChatPage embedded />
         </div>
       </div>
 
-      <aside className="custom-scrollbar space-y-5 overflow-y-auto pr-1 lg:col-span-5 lg:h-[calc(100vh-8rem)] xl:col-span-4">
+      <aside className="custom-scrollbar space-y-4 overflow-y-auto pr-1 lg:col-span-4 lg:h-[calc(100dvh-3rem)] xl:col-span-4">
         <div className="grid grid-cols-2 gap-4">
           <StatCard
             label="Balance"
