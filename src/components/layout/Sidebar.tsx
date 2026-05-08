@@ -9,6 +9,8 @@ import {
   TrendingUp,
   FileSpreadsheet,
   HandCoins,
+  BarChart3,
+  ShieldCheck,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -18,6 +20,8 @@ const navItems = [
   { to: '/transactions',  label: 'Movimientos',    icon: ArrowLeftRight   },
   { to: '/debts',         label: 'Deudas',         icon: HandCoins        },
   { to: '/import',        label: 'Importar',       icon: FileSpreadsheet  },
+  { to: '/reports',       label: 'Reportes',       icon: BarChart3        },
+  { to: '/backup',        label: 'Respaldo',       icon: ShieldCheck      },
   { to: '/settings',      label: 'Config.',        icon: Settings         },
 ];
 
