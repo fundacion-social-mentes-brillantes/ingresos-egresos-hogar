@@ -66,6 +66,10 @@ service cloud.firestore {
       match /actionLogs/{logId} {
         allow read, write: if isOwner(userId);
       }
+
+      match /aiMemory/{memoryId} {
+        allow read, write: if isOwner(userId);
+      }
       
       match /settings/{settingId} {
         allow read, write: if isOwner(userId);
