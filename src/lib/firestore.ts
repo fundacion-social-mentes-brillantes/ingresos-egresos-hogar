@@ -406,7 +406,14 @@ export async function addChatMessage(uid: string, data: Omit<ChatMessage, 'id' |
 
 // -- Action logs -------------------------------------------------------------
 export async function addActionLog(uid: string, data: Omit<ActionLog, 'id' | 'createdAt'>) {
-  return addDoc(actionLogCol(uid), cleanUndefinedFields({ ...data, createdAt: serverTimestamp() }));
+  try {
+    return await addDoc(actionLogCol(uid), cleanUndefinedFields({ ...data, createdAt: serverTimestamp() }));
+  } catch (error) {
+    // Action logs are useful for audit/history, but they must never block the bot.
+    // This protects production when Firestore rules for actionLogs are not deployed yet.
+    console.debug('Action log skipped:', error);
+    return null;
+  }
 }
 
 export async function getActionLogs(uid: string, limitCount = 50): Promise<ActionLog[]> {
