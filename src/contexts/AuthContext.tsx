@@ -11,6 +11,8 @@ import {
   createUserWithEmailAndPassword,
   signOut,
   updateProfile,
+  browserLocalPersistence,
+  setPersistence,
   type User,
 } from 'firebase/auth';
 
@@ -24,6 +26,16 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
+
+function normalizeEmail(email: string): string {
+  return String(email || '').trim().toLowerCase();
+}
+
+function normalizeDisplayName(displayName: string, email: string): string {
+  const cleanName = String(displayName || '').trim();
+  if (cleanName) return cleanName;
+  return normalizeEmail(email).split('@')[0] || 'Usuario';
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser]       = useState<User | null>(null);
@@ -48,15 +60,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       }
     } catch (err) {
+      // La cuenta no debe quedarse bloqueada si falla la creación del perfil secundario.
       console.error('Error in ensureUserProfile:', err);
     }
   };
 
   useEffect(() => {
-    // Handle redirect result if any
-    getRedirectResult(auth).catch((err) => {
-      console.error('Redirect result error:', err);
-    });
+    const prepareAuth = async () => {
+      try {
+        await setPersistence(auth, browserLocalPersistence);
+      } catch (err) {
+        console.warn('Could not set auth persistence:', err);
+      }
+
+      try {
+        const redirectResult = await getRedirectResult(auth);
+        if (redirectResult?.user) {
+          await ensureUserProfile(redirectResult.user);
+        }
+      } catch (err) {
+        console.error('Redirect result error:', err);
+      }
+    };
+
+    void prepareAuth();
 
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
       try {
@@ -75,24 +102,44 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signIn = async (email: string, password: string) => {
-    await signInWithEmailAndPassword(auth, email, password);
+    await setPersistence(auth, browserLocalPersistence);
+    await signInWithEmailAndPassword(auth, normalizeEmail(email), password);
   };
 
   const signUp = async (email: string, password: string, displayName: string) => {
-    const cred = await createUserWithEmailAndPassword(auth, email, password);
-    await updateProfile(cred.user, { displayName });
-    // Create Firestore profile
-    await createUserProfile(cred.user.uid, {
-      displayName,
-      email,
-      defaultCurrency: 'COP',
-    });
-    // Seed default accounts and categories
+    const normalizedEmail = normalizeEmail(email);
+    const normalizedName = normalizeDisplayName(displayName, normalizedEmail);
+
+    await setPersistence(auth, browserLocalPersistence);
+    const cred = await createUserWithEmailAndPassword(auth, normalizedEmail, password);
+
+    try {
+      await updateProfile(cred.user, { displayName: normalizedName });
+    } catch (e) {
+      console.warn('Could not update user display name:', e);
+    }
+
+    try {
+      await cred.user.getIdToken(true);
+    } catch (e) {
+      console.warn('Could not refresh token after sign up:', e);
+    }
+
+    try {
+      await createUserProfile(cred.user.uid, {
+        displayName: normalizedName,
+        email: normalizedEmail,
+        defaultCurrency: 'COP',
+      });
+    } catch (e) {
+      console.warn('Could not create user profile after sign up:', e);
+    }
+
     try {
       await cred.user.getIdToken(true);
       await callSeedDefaultUserData({});
     } catch (e) {
-      console.warn('Could not seed default data:', e);
+      console.warn('Could not seed default data after sign up:', e);
     }
   };
 
@@ -100,15 +147,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const provider = new GoogleAuthProvider();
     provider.setCustomParameters({ 
       prompt: 'select_account',
-      // Useful for cross-domain auth issues
       display: 'popup'
     });
 
+    await setPersistence(auth, browserLocalPersistence);
+
     try {
       await signInWithPopup(auth, provider);
-      // Profile creation handled by onAuthStateChanged
+      // Profile creation handled by onAuthStateChanged.
     } catch (err: any) {
-      // If popup is blocked, fallback to redirect
+      // If popup is blocked or closed, fallback to redirect.
       if (err.code === 'auth/popup-blocked' || err.code === 'auth/cancelled-popup-request' || err.code === 'auth/popup-closed-by-user') {
         console.log('Popup blocked or cancelled, trying redirect...');
         await signInWithRedirect(auth, provider);
