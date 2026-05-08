@@ -25,6 +25,8 @@ import type { Transaction, Account, ChatMessage, AppSettings, UserProfile, Debt 
 const userRef = (uid: string) => doc(db, 'users', uid);
 const txCol = (uid: string) => collection(db, 'users', uid, 'transactions');
 const txRef = (uid: string, id: string) => doc(db, 'users', uid, 'transactions', id);
+const deletedTxCol = (uid: string) => collection(db, 'users', uid, 'deletedTransactions');
+const deletedTxRef = (uid: string, id: string) => doc(db, 'users', uid, 'deletedTransactions', id);
 const debtCol = (uid: string) => collection(db, 'users', uid, 'debts');
 const debtRef = (uid: string, id: string) => doc(db, 'users', uid, 'debts', id);
 const accCol = (uid: string) => collection(db, 'users', uid, 'accounts');
@@ -181,9 +183,32 @@ export async function addTransaction(uid: string, data: Omit<Transaction, 'id' |
 }
 
 export async function updateTransaction(uid: string, id: string, data: Partial<Transaction>) {
-  const payload: Record<string, unknown> = { ...data, updatedAt: serverTimestamp() };
+  const current = await getDoc(txRef(uid, id));
+  if (!current.exists()) return;
+
+  const previous = normalizeTransaction(current.id, current.data());
+  const nextType = data.type || previous.type;
+  const nextAmount = Number(data.amount ?? previous.amount);
+  const nextAccountId = data.accountId || previous.accountId;
+  const payload: Record<string, unknown> = { ...data, amount: nextAmount, updatedAt: serverTimestamp() };
   if (data.date) payload.date = Timestamp.fromDate(data.date instanceof Date ? data.date : new Date(data.date));
-  return updateDoc(txRef(uid, id), payload);
+
+  const batch = writeBatch(db);
+  batch.update(txRef(uid, id), payload);
+
+  const oldEffect = previous.type === 'income' ? previous.amount : -previous.amount;
+  const newEffect = nextType === 'income' ? nextAmount : -nextAmount;
+  if (previous.accountId && nextAccountId && previous.accountId === nextAccountId) {
+    const delta = newEffect - oldEffect;
+    if (delta !== 0) {
+      batch.update(accRef(uid, nextAccountId), { currentBalance: increment(delta), updatedAt: serverTimestamp() });
+    }
+  } else {
+    if (previous.accountId) batch.update(accRef(uid, previous.accountId), { currentBalance: increment(-oldEffect), updatedAt: serverTimestamp() });
+    if (nextAccountId) batch.update(accRef(uid, nextAccountId), { currentBalance: increment(newEffect), updatedAt: serverTimestamp() });
+  }
+
+  await batch.commit();
 }
 
 export async function deleteTransaction(uid: string, id: string) {
@@ -192,6 +217,13 @@ export async function deleteTransaction(uid: string, id: string) {
 
   const tx = current.data() as Partial<Transaction>;
   const batch = writeBatch(db);
+  const deletedRef = doc(deletedTxCol(uid));
+  batch.set(deletedRef, {
+    ...tx,
+    originalId: id,
+    deletedAt: serverTimestamp(),
+    recoverable: true,
+  });
   batch.delete(txRef(uid, id));
 
   if (tx.accountId && typeof tx.amount === 'number' && tx.type) {
@@ -203,6 +235,39 @@ export async function deleteTransaction(uid: string, id: string) {
   }
 
   await batch.commit();
+}
+
+export async function restoreLastDeletedTransaction(uid: string): Promise<Transaction | null> {
+  const snap = await getDocs(query(deletedTxCol(uid), orderBy('deletedAt', 'desc'), limit(1)));
+  const deleted = snap.docs[0];
+  if (!deleted) return null;
+
+  const data = deleted.data() as Record<string, any>;
+  const originalId = String(data.originalId || deleted.id);
+  const restoredData = { ...data };
+  delete restoredData.originalId;
+  delete restoredData.deletedAt;
+  delete restoredData.recoverable;
+
+  const restored = normalizeTransaction(originalId, restoredData);
+  const batch = writeBatch(db);
+  batch.set(txRef(uid, originalId), {
+    ...restoredData,
+    restoredAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  batch.delete(deletedTxRef(uid, deleted.id));
+
+  if (restored.accountId && restored.amount && restored.type) {
+    const balanceChange = restored.type === 'income' ? restored.amount : -restored.amount;
+    batch.update(accRef(uid, restored.accountId), {
+      currentBalance: increment(balanceChange),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  await batch.commit();
+  return restored;
 }
 
 // -- Debts and loans ---------------------------------------------------------
