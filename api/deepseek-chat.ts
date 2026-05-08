@@ -2,6 +2,8 @@ declare const process: {
   env: Record<string, string | undefined>;
 };
 
+type FastTransactionType = 'income' | 'expense';
+
 function extractJsonObject(content: string): string {
   const trimmed = String(content || '').trim();
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -24,6 +26,122 @@ function getBearerToken(req: any): string | null {
   const header = String(req.headers?.authorization || req.headers?.Authorization || '');
   const match = header.match(/^Bearer\s+(.+)$/i);
   return match?.[1] || null;
+}
+
+function normalizePlainText(value: string): string {
+  return String(value || '')
+    .toLowerCase()
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function parseSimpleAmount(value: string): number {
+  const text = normalizePlainText(value).replace(/\s+/g, ' ');
+  const match = text.match(/(?:\$\s*)?(\d+(?:[.,]\d+)?)\s*(mil|lucas?|k|millones?|millon)?/i);
+  if (!match) return 0;
+  const base = Number.parseFloat(match[1].replace(',', '.'));
+  if (!Number.isFinite(base)) return 0;
+  const scale = match[2] || '';
+  if (scale.startsWith('mil') || scale.startsWith('luca') || scale === 'k') return Math.round(base * 1000);
+  if (scale.startsWith('millon')) return Math.round(base * 1000000);
+  return Math.round(base);
+}
+
+function inferSimpleType(message: string): FastTransactionType | null {
+  const text = normalizePlainText(message);
+  const expenseWords = [
+    'gaste', 'me gaste', 'gasto', 'compre', 'pague', 'pagar', 'pago', 'me toco pagar', 'almorce',
+    'cene', 'desayune', 'recargue', 'tanquie', 'saque para', 'inverti en', 'acabe de pagar', 'acabo de pagar',
+  ];
+  const incomeWords = [
+    'ingrese', 'ingresa', 'ingreso', 'me entro', 'entro', 'entraron', 'recibi', 'me pagaron', 'cobre',
+    'cobro', 'consignaron', 'depositaron', 'vendi', 'venta', 'sueldo', 'salario', 'quincena', 'me llego',
+  ];
+  if (expenseWords.some((word) => text.includes(word))) return 'expense';
+  if (incomeWords.some((word) => text.includes(word))) return 'income';
+  return null;
+}
+
+function isComplexOrDangerous(message: string): boolean {
+  const text = normalizePlainText(message);
+  const blocked = [
+    'borra', 'borrar', 'elimina', 'eliminar', 'quita', 'quitar', 'corrige', 'corregir', 'cambia', 'modifica',
+    'actualiza', 'duplicado', 'duplicados', 'limpia', 'limpiar', 'deuda', 'debo', 'me debe', 'prestamo', 'preste',
+    'abona', 'abono', 'pago deuda', 'analiza', 'como voy', 'reporte', 'plan', 'codigo', 'html', 'css', 'react',
+    'javascript', 'typescript', 'prompt', 'explica', 'por que', 'porque', 'imagen', 'foto', 'excel',
+  ];
+  return blocked.some((word) => text.includes(word));
+}
+
+function inferSimpleCategory(message: string, type: FastTransactionType): string {
+  if (type === 'income') return 'Ingreso';
+  const text = normalizePlainText(message);
+  if (['hamburguesa', 'papita', 'papas', 'helado', 'comida', 'mercado', 'cafe', 'almuerzo', 'restaurante', 'tienda', 'pan', 'gaseosa'].some((word) => text.includes(word))) return 'Alimentación';
+  if (['bus', 'taxi', 'uber', 'gasolina', 'transporte', 'pasaje', 'moto', 'carro'].some((word) => text.includes(word))) return 'Transporte';
+  if (['arriendo', 'luz', 'agua', 'gas', 'internet', 'hogar', 'servicio'].some((word) => text.includes(word))) return 'Hogar';
+  if (['medicina', 'farmacia', 'salud', 'doctor', 'cita medica'].some((word) => text.includes(word))) return 'Salud';
+  if (['ropa', 'zapatos', 'camisa', 'pantalon'].some((word) => text.includes(word))) return 'Ropa';
+  return 'Otros';
+}
+
+function inferSimpleDescription(message: string, type: FastTransactionType): string {
+  const description = String(message || '')
+    .replace(/\$?\s*\d+(?:[.,]\d+)?\s*(mil|lucas?|k|millones?|millon)?/gi, '')
+    .replace(/\b(me gaste|gast[eé]|gasto|compre|compr[eé]|pague|pagu[eé]|pago|pagar|acabe de pagar|acabo de pagar|ingresa|ingrese|ingreso|me entro|entro|entraron|recibi|recib[ií]|me pagaron|cobre|cobr[eé]|vendi|venta|por|en|de|con|una|un|la|el)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (description) return description.charAt(0).toUpperCase() + description.slice(1);
+  return type === 'income' ? 'Ingreso registrado desde el chat' : 'Gasto registrado desde el chat';
+}
+
+function inferSimpleAccount(message: string, context: unknown): string {
+  const text = normalizePlainText(message);
+  if (text.includes('nequi')) return 'Nequi';
+  if (text.includes('daviplata') || text.includes('davi plata')) return 'Daviplata';
+  if (text.includes('banco')) return 'Banco';
+  if (text.includes('efectivo')) return 'Efectivo';
+
+  const contextText = String(context || '');
+  const efectivoLooksZero = /Efectivo\s*\(\$\s*0\)/i.test(contextText);
+  const nequiLooksPositive = /Nequi\s*\(\$\s*(?!0\))[^)]*\)/i.test(contextText);
+  if (efectivoLooksZero && nequiLooksPositive) return 'Nequi';
+
+  return 'Efectivo';
+}
+
+function buildFastTransactionAction(message: string, context: unknown) {
+  if (isComplexOrDangerous(message)) return null;
+  const amount = parseSimpleAmount(message);
+  const type = inferSimpleType(message);
+  if (!type || amount <= 0) return null;
+
+  const category = inferSimpleCategory(message, type);
+  const accountName = inferSimpleAccount(message, context);
+  const description = inferSimpleDescription(message, type);
+  const verb = type === 'income' ? 'ingreso' : 'gasto';
+
+  return {
+    intent: 'create_transaction',
+    replyToUser: `Listo, registré ${type === 'income' ? 'un' : 'el'} ${verb} de $${amount.toLocaleString('es-CO')} en ${accountName}${description ? ` (${description})` : ''}.`,
+    confidence: 0.98,
+    assistantMode: 'registro',
+    riskLevel: 'low',
+    emotionalTone: 'encouraging',
+    transaction: {
+      type,
+      amount,
+      currency: 'COP',
+      category,
+      accountName,
+      description,
+      date: 'today',
+    },
+    insights: [],
+    suggestedActions: [],
+    suggestedNextQuestion: '',
+    memoryPatch: {},
+  };
 }
 
 function safeActionFromContent(content: string) {
@@ -87,14 +205,19 @@ export default async function handler(req: any, res: any) {
     return res.status(401).json({ error: 'Sesion invalida o vencida.', details: String(error?.message || error), source: 'auth' });
   }
 
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: 'DEEPSEEK_API_KEY no esta configurada en Vercel para este proyecto.', source: 'vercel-env' });
-
   const { message, imageBase64, imageMimeType, context, chatHistory, excelImportContext, aiMemory, diagnosticContext } = req.body || {};
   if (!message || typeof message !== 'string') return res.status(400).json({ error: 'El mensaje es obligatorio.' });
   if (message.length > 4000) return res.status(413).json({ error: 'El mensaje es demasiado largo.' });
 
   const hasImage = Boolean(imageBase64 && imageMimeType);
+  const fastAction = !hasImage && !excelImportContext ? buildFastTransactionAction(message, context) : null;
+  if (fastAction) {
+    return res.status(200).json({ action: fastAction, model: 'local-fast-transaction' });
+  }
+
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: 'DEEPSEEK_API_KEY no esta configurada en Vercel para este proyecto.', source: 'vercel-env' });
+
   const excelContextBlock = excelImportContext
     ? `\n\nEXCEL ADJUNTO POR EL USUARIO:\n${String(excelImportContext).slice(0, 12000)}\n\nAnaliza este Excel como migracion financiera. Explica ingresos, gastos, balance, filas dudosas y pregunta si quiere guardar/importar. No digas que ya guardaste si aun no confirmo.`
     : '';
@@ -161,6 +284,9 @@ Acciones soportadas por el cliente hoy: crear UN movimiento, crear UNA deuda, co
 Si el usuario pide limpiar duplicados, borrar varios ingresos, mover todos los saldos o reconstruir cuentas, NO uses create_transaction para simularlo. Usa clarify o financial_advice y explica que se debe hacer con un flujo de limpieza guiado. No afirmes que ya se hizo.
 Cuando la intencion sea borrar, corregir, registrar abonos o cerrar deudas, describe exactamente que se tocaria. Si hay ambiguedad, usa clarify. No digas que ya borraste/corregiste/cerraste; la ejecucion la hace la app luego de confirmar.
 "deshacer" debe tratarse como conversation_only o clarify; la app restaurara el ultimo borrado, no pidas borrar.
+
+REGLA DE RAPIDEZ
+Si el mensaje es un gasto o ingreso simple con valor claro, responde con intent create_transaction, confidence 0.95 o mayor, sin pedir confirmacion. Ejemplos: "gaste 1000 en papitas", "pague 16000 por hamburguesa", "me entro 50000". Solo pide confirmacion para borrar, corregir, deudas, datos ambiguos o acciones masivas.
 
 REGLA PARA CODIGO Y RESPUESTAS CREATIVAS
 Si el usuario pide codigo, interfaz, HTML, React, CSS, explicacion bonita, plantilla o informe:
