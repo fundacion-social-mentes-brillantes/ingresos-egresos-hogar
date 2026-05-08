@@ -3,7 +3,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { AppLayout } from './components/layout/AppLayout';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
-import { ChatPage } from './pages/ChatPageSafe';
+import { ChatPage } from './pages/ChatPagePro';
 import { TransactionsPage } from './pages/TransactionsPage';
 import { ImportPage } from './pages/ImportPage';
 import { DebtsPage } from './pages/DebtsPage';
