@@ -44,10 +44,35 @@ const chatCol = (uid: string) => collection(db, 'users', uid, 'chatMessages');
 const actionLogCol = (uid: string) => collection(db, 'users', uid, 'actionLogs');
 const settRef = (uid: string) => doc(db, 'users', uid, 'settings', 'app');
 
-function cleanUndefinedFields<T extends Record<string, unknown>>(data: T): Partial<T> {
+type FirestoreObject = Record<string, unknown>;
+
+function isPlainObject(value: unknown): value is FirestoreObject {
+  if (!value || typeof value !== 'object') return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function cleanFirestoreValue(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (value instanceof Date) return value;
+  if (value instanceof Timestamp) return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => cleanFirestoreValue(item))
+      .filter((item) => item !== undefined);
+  }
+  if (!isPlainObject(value)) return value;
+
   return Object.fromEntries(
-    Object.entries(data).filter(([, value]) => value !== undefined)
-  ) as Partial<T>;
+    Object.entries(value)
+      .map(([key, item]) => [key, cleanFirestoreValue(item)] as const)
+      .filter(([, item]) => item !== undefined)
+  );
+}
+
+function cleanUndefinedFields<T extends FirestoreObject>(data: T): Partial<T> {
+  return cleanFirestoreValue(data) as Partial<T>;
 }
 
 function toDate(value: unknown): Date {
@@ -126,12 +151,12 @@ export async function getUserProfile(uid: string): Promise<UserProfile | null> {
 export async function createUserProfile(uid: string, data: Omit<UserProfile, 'uid' | 'createdAt'>) {
   await setDoc(
     userRef(uid),
-    {
+    cleanUndefinedFields({
       ...data,
       defaultCurrency: 'COP',
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    },
+    }),
     { merge: true }
   );
 }
@@ -153,18 +178,18 @@ export async function getAccounts(uid: string): Promise<Account[]> {
 }
 
 export async function addAccount(uid: string, data: Omit<Account, 'id' | 'createdAt'>) {
-  return addDoc(accCol(uid), {
+  return addDoc(accCol(uid), cleanUndefinedFields({
     ...data,
     initialBalance: Number(data.initialBalance || 0),
     currentBalance: Number(data.currentBalance || 0),
     active: data.active ?? true,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
-  });
+  }));
 }
 
 export async function updateAccount(uid: string, id: string, data: Partial<Account>) {
-  return updateDoc(accRef(uid, id), { ...data, updatedAt: serverTimestamp() });
+  return updateDoc(accRef(uid, id), cleanUndefinedFields({ ...data, updatedAt: serverTimestamp() }));
 }
 
 // -- Transactions ------------------------------------------------------------
@@ -194,21 +219,24 @@ export async function addTransaction(uid: string, data: Omit<Transaction, 'id' |
   const newTxRef = doc(txCol(uid));
   const amount = Number(data.amount || 0);
 
-  batch.set(newTxRef, {
+  batch.set(newTxRef, cleanUndefinedFields({
     ...data,
     amount,
     currency: data.currency || 'COP',
+    category: data.category || (data.type === 'income' ? 'Ingreso' : 'Otros'),
+    accountName: data.accountName || 'Efectivo',
+    description: data.description || 'Movimiento registrado desde el chat',
     date: Timestamp.fromDate(data.date instanceof Date ? data.date : new Date(data.date)),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
-  });
+  }));
 
   if (data.accountId) {
     const balanceChange = data.type === 'income' ? amount : -amount;
-    batch.update(accRef(uid, data.accountId), {
+    batch.update(accRef(uid, data.accountId), cleanUndefinedFields({
       currentBalance: increment(balanceChange),
       updatedAt: serverTimestamp(),
-    });
+    }));
   }
 
   await batch.commit();
@@ -223,22 +251,22 @@ export async function updateTransaction(uid: string, id: string, data: Partial<T
   const nextType = data.type || previous.type;
   const nextAmount = Number(data.amount ?? previous.amount);
   const nextAccountId = data.accountId || previous.accountId;
-  const payload: Record<string, unknown> = { ...data, amount: nextAmount, updatedAt: serverTimestamp() };
+  const payload: Record<string, unknown> = cleanUndefinedFields({ ...data, amount: nextAmount, updatedAt: serverTimestamp() });
   if (data.date) payload.date = Timestamp.fromDate(data.date instanceof Date ? data.date : new Date(data.date));
 
   const batch = writeBatch(db);
-  batch.update(txRef(uid, id), payload);
+  batch.update(txRef(uid, id), cleanUndefinedFields(payload));
 
   const oldEffect = previous.type === 'income' ? previous.amount : -previous.amount;
   const newEffect = nextType === 'income' ? nextAmount : -nextAmount;
   if (previous.accountId && nextAccountId && previous.accountId === nextAccountId) {
     const delta = newEffect - oldEffect;
     if (delta !== 0) {
-      batch.update(accRef(uid, nextAccountId), { currentBalance: increment(delta), updatedAt: serverTimestamp() });
+      batch.update(accRef(uid, nextAccountId), cleanUndefinedFields({ currentBalance: increment(delta), updatedAt: serverTimestamp() }));
     }
   } else {
-    if (previous.accountId) batch.update(accRef(uid, previous.accountId), { currentBalance: increment(-oldEffect), updatedAt: serverTimestamp() });
-    if (nextAccountId) batch.update(accRef(uid, nextAccountId), { currentBalance: increment(newEffect), updatedAt: serverTimestamp() });
+    if (previous.accountId) batch.update(accRef(uid, previous.accountId), cleanUndefinedFields({ currentBalance: increment(-oldEffect), updatedAt: serverTimestamp() }));
+    if (nextAccountId) batch.update(accRef(uid, nextAccountId), cleanUndefinedFields({ currentBalance: increment(newEffect), updatedAt: serverTimestamp() }));
   }
 
   await batch.commit();
@@ -251,20 +279,20 @@ export async function deleteTransaction(uid: string, id: string) {
   const tx = current.data() as Partial<Transaction>;
   const batch = writeBatch(db);
   const deletedRef = doc(deletedTxCol(uid));
-  batch.set(deletedRef, {
+  batch.set(deletedRef, cleanUndefinedFields({
     ...tx,
     originalId: id,
     deletedAt: serverTimestamp(),
     recoverable: true,
-  });
+  }));
   batch.delete(txRef(uid, id));
 
   if (tx.accountId && typeof tx.amount === 'number' && tx.type) {
     const reverseBalance = tx.type === 'income' ? -tx.amount : tx.amount;
-    batch.update(accRef(uid, tx.accountId), {
+    batch.update(accRef(uid, tx.accountId), cleanUndefinedFields({
       currentBalance: increment(reverseBalance),
       updatedAt: serverTimestamp(),
-    });
+    }));
   }
 
   await batch.commit();
@@ -289,19 +317,19 @@ export async function restoreDeletedTransaction(uid: string, deletedId: string):
 
   const restored = normalizeTransaction(originalId, restoredData);
   const batch = writeBatch(db);
-  batch.set(txRef(uid, originalId), {
+  batch.set(txRef(uid, originalId), cleanUndefinedFields({
     ...restoredData,
     restoredAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
-  });
+  }));
   batch.delete(deletedTxRef(uid, deletedSnap.id));
 
   if (restored.accountId && restored.amount && restored.type) {
     const balanceChange = restored.type === 'income' ? restored.amount : -restored.amount;
-    batch.update(accRef(uid, restored.accountId), {
+    batch.update(accRef(uid, restored.accountId), cleanUndefinedFields({
       currentBalance: increment(balanceChange),
       updatedAt: serverTimestamp(),
-    });
+    }));
   }
 
   await batch.commit();
@@ -341,7 +369,7 @@ export async function updateDebt(uid: string, id: string, data: Partial<Debt>) {
   const payload: Record<string, unknown> = cleanUndefinedFields({ ...data, updatedAt: serverTimestamp() });
   if (data.dueDate !== undefined) payload.dueDate = data.dueDate ? Timestamp.fromDate(data.dueDate) : null;
   if (data.closedAt !== undefined) payload.closedAt = data.closedAt ? Timestamp.fromDate(data.closedAt) : null;
-  return updateDoc(debtRef(uid, id), payload);
+  return updateDoc(debtRef(uid, id), cleanUndefinedFields(payload));
 }
 
 export async function deleteDebt(uid: string, id: string) {
@@ -396,5 +424,5 @@ export async function getSettings(uid: string): Promise<AppSettings> {
 }
 
 export async function updateSettings(uid: string, data: Partial<AppSettings>) {
-  return setDoc(settRef(uid), { ...data, updatedAt: serverTimestamp() }, { merge: true });
+  return setDoc(settRef(uid), cleanUndefinedFields({ ...data, updatedAt: serverTimestamp() }), { merge: true });
 }
