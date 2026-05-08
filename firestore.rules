@@ -2,16 +2,42 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    
     function isOwner(userId) {
       return request.auth != null && request.auth.uid == userId;
+    }
+
+    function validTransaction(data) {
+      return data.type in ['income', 'expense']
+        && data.amount is number
+        && data.amount > 0
+        && data.currency == 'COP'
+        && data.category is string
+        && data.accountId is string
+        && data.accountName is string
+        && data.description is string
+        && data.date is timestamp;
+    }
+
+    function validDebt(data) {
+      return data.direction in ['receivable', 'payable']
+        && data.personName is string
+        && data.amountOriginal is number
+        && data.amountOriginal > 0
+        && data.amountPaid is number
+        && data.amountPaid >= 0
+        && data.currency == 'COP'
+        && data.description is string
+        && data.status in ['open', 'partial', 'paid'];
     }
 
     match /users/{userId} {
       allow read, write: if isOwner(userId);
       
       match /transactions/{transactionId} {
-        allow read, write: if isOwner(userId);
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && validTransaction(request.resource.data);
+        allow update: if isOwner(userId) && validTransaction(request.resource.data);
+        allow delete: if isOwner(userId);
       }
       
       match /accounts/{accountId} {
@@ -23,7 +49,10 @@ service cloud.firestore {
       }
 
       match /debts/{debtId} {
-        allow read, write: if isOwner(userId);
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && validDebt(request.resource.data);
+        allow update: if isOwner(userId) && validDebt(request.resource.data);
+        allow delete: if isOwner(userId);
       }
 
       match /deletedTransactions/{deletedId} {
@@ -31,6 +60,10 @@ service cloud.firestore {
       }
 
       match /backupExports/{backupId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /actionLogs/{logId} {
         allow read, write: if isOwner(userId);
       }
       
