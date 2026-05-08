@@ -20,7 +20,11 @@ export type BotIntent =
   | 'register_debt_payment'
   | 'close_debt'
   | 'clarify'
-  | 'conversation_only';
+  | 'conversation_only'
+  | 'import_transactions';
+
+export type ActionLogStatus = 'pending' | 'confirmed' | 'executed' | 'cancelled' | 'failed';
+export type ActionLogSource = 'bot' | 'manual' | 'system';
 
 export interface UserProfile {
   uid: string;
@@ -57,6 +61,13 @@ export interface Transaction {
   updatedAt: Date;
 }
 
+export interface DeletedTransaction extends Transaction {
+  deletedId: string;
+  originalId: string;
+  deletedAt: Date;
+  recoverable?: boolean;
+}
+
 export interface Debt {
   id: string;
   direction: DebtDirection;
@@ -87,6 +98,19 @@ export interface ChatMessage {
   debtId?: string;
   summary?: FinancialSummary;
   imageUrl?: string;
+}
+
+export interface ActionLog {
+  id: string;
+  action: string;
+  entityType: 'transaction' | 'debt' | 'backup' | 'chat' | 'settings' | 'system';
+  entityId?: string;
+  description: string;
+  before?: unknown;
+  after?: unknown;
+  source: ActionLogSource;
+  status: ActionLogStatus;
+  createdAt: Date;
 }
 
 export interface AppSettings {
