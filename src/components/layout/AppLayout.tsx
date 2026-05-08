@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
-import { Sidebar, BottomNav } from './Sidebar';
+import { Sidebar } from './Sidebar';
+import { MobileNav } from './MobileNav';
 
 interface AppLayoutProps {
   children: React.ReactNode;
@@ -23,7 +24,7 @@ export function AppLayout({ children }: AppLayoutProps) {
           {children}
         </div>
       </main>
-      <BottomNav />
+      <MobileNav />
     </div>
   );
 }
