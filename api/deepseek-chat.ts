@@ -26,6 +26,32 @@ function getBearerToken(req: any): string | null {
   return match?.[1] || null;
 }
 
+function safeActionFromContent(content: string) {
+  try {
+    return JSON.parse(extractJsonObject(content));
+  } catch (error) {
+    console.error('DeepSeek returned non JSON content', error, String(content || '').slice(0, 1200));
+    return {
+      intent: 'conversation_only',
+      replyToUser: String(content || 'Te escucho, pero la IA respondió en un formato que la app no pudo interpretar. Te lo resumo: intenta escribir la solicitud de nuevo con una acción concreta o pídeme una explicación.'),
+      confidence: 0.35,
+      assistantMode: 'conversacion',
+      riskLevel: 'medium',
+      emotionalTone: 'neutral',
+      insights: [
+        {
+          title: 'Respuesta recuperada',
+          detail: 'DeepSeek respondió, pero no en el JSON exacto que necesita la app. Evité que el chat se cayera.',
+          severity: 'medium',
+        },
+      ],
+      suggestedActions: ['Reformular la solicitud con una acción concreta'],
+      suggestedNextQuestion: '¿Qué quieres que haga exactamente: registrar, borrar uno, analizar o generar código?',
+      memoryPatch: {},
+    };
+  }
+}
+
 async function verifyFirebaseToken(idToken: string): Promise<{ uid: string; email?: string }> {
   const firebaseApiKey = process.env.FIREBASE_WEB_API_KEY || process.env.VITE_FIREBASE_API_KEY;
   if (!firebaseApiKey) throw new Error('FIREBASE_WEB_API_KEY no esta configurada en Vercel.');
@@ -85,7 +111,7 @@ uid: ${verifiedUser.uid}
 email: ${verifiedUser.email || 'sin email'}
 
 IDENTIDAD Y PERSONALIDAD
-Eres un copiloto financiero, técnico y creativo: humano, colombiano, claro, inteligente y cercano.
+Eres un copiloto financiero, tecnico y creativo: humano, colombiano, claro, inteligente y cercano.
 No eres formulario. No eres menu. No eres asistente frio.
 Hablas como alguien que entiende la situacion, piensa antes de responder y ayuda a decidir.
 Tu estilo base: calido, directo, practico, sin reganar ni humillar. Si hay riesgo, lo dices con firmeza. Si el usuario esta confundido, ordenas. Si esta preocupado, calmas. Si va bien, reconoces y propones siguiente paso.
@@ -141,7 +167,7 @@ Si el usuario pide codigo, interfaz, HTML, React, CSS, explicacion bonita, plant
 - NO lo trates como registro financiero.
 - Usa intent "conversation_only" o "financial_advice".
 - Entrega el resultado en replyToUser con estructura clara.
-- Puedes incluir bloques de codigo dentro de replyToUser usando triple backticks, por ejemplo ```html, ```tsx, ```css.
+- Puedes incluir bloques de codigo markdown dentro de replyToUser si el usuario lo pide. Usa el formato normal de tres acentos graves, pero recuerda que todo debe ir escapado correctamente como texto dentro del JSON.
 - El codigo debe ser usable, ordenado y explicado.
 - Si el codigo usa datos financieros, usa los datos reales del contexto o deja variables claras.
 - Si es mucho codigo, entrega primero una version completa pero compacta y ofrece continuar con mejoras.
@@ -247,7 +273,7 @@ ${imageContextBlock}
     const data = JSON.parse(raw);
     const content = data?.choices?.[0]?.message?.content;
     if (!content) return res.status(502).json({ error: 'DeepSeek V4 Pro respondio vacio.', source: 'deepseek-v4-pro' });
-    const action = JSON.parse(extractJsonObject(content));
+    const action = safeActionFromContent(content);
     return res.status(200).json({ action, model: 'deepseek-v4-pro' });
   } catch (error: any) {
     console.error('Vercel DeepSeek route failed', error?.message || error);
