@@ -1,9 +1,57 @@
 import { useState, useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Mail, Lock, User, TrendingUp, AlertCircle } from 'lucide-react';
+
+function getAuthErrorMessage(err: unknown, mode: 'login' | 'register' | 'google'): string {
+  const error = err as { code?: string; message?: string };
+  const code = error?.code ?? '';
+  const msg = error?.message ?? '';
+
+  if (code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+    return 'Correo o contraseña incorrectos.';
+  }
+  if (code === 'auth/email-already-in-use') {
+    return 'Este correo ya está registrado. Intenta iniciar sesión o usa otro correo.';
+  }
+  if (code === 'auth/invalid-email') {
+    return 'El correo no parece válido. Revísalo e intenta de nuevo.';
+  }
+  if (code === 'auth/weak-password') {
+    return 'La contraseña es muy débil. Usa mínimo 6 caracteres, idealmente con letras y números.';
+  }
+  if (code === 'auth/operation-not-allowed') {
+    return mode === 'google'
+      ? 'El inicio con Google no está habilitado en Firebase. Hay que activarlo en Authentication.'
+      : 'El registro con correo y contraseña no está habilitado en Firebase. Hay que activarlo en Authentication.';
+  }
+  if (code === 'auth/unauthorized-domain') {
+    return 'Este dominio de Vercel no está autorizado en Firebase. Hay que agregar ingresos-egresos-hogar.vercel.app en Authorized domains.';
+  }
+  if (code === 'auth/popup-closed-by-user') {
+    return 'Cerraste la ventana de Google antes de terminar.';
+  }
+  if (code === 'auth/popup-blocked') {
+    return 'El navegador bloqueó la ventana de Google. Permite ventanas emergentes o intenta de nuevo.';
+  }
+  if (code === 'auth/account-exists-with-different-credential') {
+    return 'Ya existe una cuenta con este correo usando otro método de acceso.';
+  }
+  if (code === 'auth/network-request-failed') {
+    return 'Hay un problema de conexión. Revisa internet e intenta otra vez.';
+  }
+  if (code === 'auth/too-many-requests') {
+    return 'Firebase bloqueó temporalmente los intentos por seguridad. Espera unos minutos e intenta de nuevo.';
+  }
+
+  if (code || msg) {
+    return `No se pudo completar la acción. Detalle técnico: ${code || msg}`;
+  }
+
+  return 'Ocurrió un error. Intenta de nuevo.';
+}
 
 export function LoginPage() {
   const { user, signIn, signUp, signInWithGoogle } = useAuth();
@@ -29,25 +77,10 @@ export function LoginPage() {
     setLoading(true);
     try {
       await signInWithGoogle();
-      // El navigate se hace por el useEffect de arriba o si signInWithGoogle termina exitosamente
-      // navigate('/dashboard'); 
-    } catch (err: any) {
+      // El navigate se hace por el useEffect de arriba o por el redirect de Google.
+    } catch (err: unknown) {
       console.error('Google Sign-In Error:', err);
-      const code = err.code ?? '';
-      const msg = err.message ?? '';
-      if (code === 'auth/popup-closed-by-user') {
-        setError('Cerraste la ventana de Google antes de terminar.');
-      } else if (code === 'auth/popup-blocked') {
-        setError('El navegador bloqueó la ventana. Redirigiendo para intentar de nuevo...');
-      } else if (code === 'auth/unauthorized-domain') {
-        setError('Este dominio no está autorizado en Firebase. Avisa al administrador.');
-      } else if (code === 'auth/operation-not-allowed') {
-        setError('El inicio de sesión con Google no está habilitado en Firebase.');
-      } else if (code === 'auth/account-exists-with-different-credential') {
-        setError('Ya existe una cuenta con este correo usando otro método de acceso.');
-      } else {
-        setError(`Error: ${code || msg || 'No se pudo iniciar sesión con Google.'}`);
-      }
+      setError(getAuthErrorMessage(err, 'google'));
     } finally {
       setLoading(false);
     }
@@ -57,28 +90,29 @@ export function LoginPage() {
     e.preventDefault();
     setError('');
 
+    const cleanEmail = form.email.trim().toLowerCase();
+    const cleanName = form.name.trim();
+
+    if (!cleanEmail) return setError('Escribe tu correo.');
+    if (!form.password) return setError('Escribe tu contraseña.');
+
     if (mode === 'register') {
-      if (!form.name.trim())              return setError('Escribe tu nombre.');
+      if (!cleanName)                  return setError('Escribe tu nombre.');
       if (form.password !== form.confirm) return setError('Las contraseñas no coinciden.');
-      if (form.password.length < 6)      return setError('La contraseña debe tener al menos 6 caracteres.');
+      if (form.password.length < 6)       return setError('La contraseña debe tener al menos 6 caracteres.');
     }
 
     setLoading(true);
     try {
       if (mode === 'login') {
-        await signIn(form.email, form.password);
+        await signIn(cleanEmail, form.password);
       } else {
-        await signUp(form.email, form.password, form.name);
+        await signUp(cleanEmail, form.password, cleanName);
       }
       navigate('/dashboard');
     } catch (err: unknown) {
-      const code = (err as { code?: string })?.code ?? '';
-      if (code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential')
-        setError('Correo o contraseña incorrectos.');
-      else if (code === 'auth/email-already-in-use')
-        setError('Este correo ya está registrado.');
-      else
-        setError('Ocurrió un error. Intenta de nuevo.');
+      console.error(`${mode === 'login' ? 'Login' : 'Register'} error:`, err);
+      setError(getAuthErrorMessage(err, mode));
     } finally {
       setLoading(false);
     }
