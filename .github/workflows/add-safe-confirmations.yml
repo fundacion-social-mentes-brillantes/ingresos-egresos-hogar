@@ -1,0 +1,184 @@
+name: Add Safe Confirmations
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/add-safe-confirmations.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Patch ChatPage confirmations
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/pages/ChatPage.tsx')
+          s = p.read_text(encoding='utf-8')
+
+          if 'restoreLastDeletedTransaction' not in s:
+            s = s.replace('deleteTransaction,\n  getAccounts,', 'deleteTransaction,\n  restoreLastDeletedTransaction,\n  getAccounts,')
+
+          if 'interface PendingAction' not in s:
+            s = s.replace('interface VercelBotAction {', """interface PendingAction {
+  kind: 'delete_transaction' | 'update_transaction' | 'close_debt';
+  transactionId?: string;
+  debtId?: string;
+  amount?: number;
+  category?: string;
+  description?: string;
+  label: string;
+}
+
+interface VercelBotAction {""")
+
+          if 'function isPositiveConfirmation' not in s:
+            s = s.replace('function normalizeText(value: string): string {', """function isPositiveConfirmation(message: string): boolean {
+  const text = normalizeText(message);
+  return ['si', 'sí', 'confirmo', 'confirmar', 'dale', 'hazlo', 'correcto', 'ok', 'listo'].some((word) => text === word || text.includes(word));
+}
+
+function isNegativeConfirmation(message: string): boolean {
+  const text = normalizeText(message);
+  return ['no', 'cancelar', 'cancela', 'no lo hagas'].some((word) => text === word || text.includes(word));
+}
+
+function looksLikeUndoRequest(message: string): boolean {
+  const text = normalizeText(message);
+  return ['deshacer', 'deshaz', 'restaura', 'restaurar', 'recupera', 'recuperar'].some((word) => text.includes(word));
+}
+
+function normalizeText(value: string): string {""")
+
+          s = s.replace("['borra', 'borrar', 'elimina', 'eliminar', 'quita', 'quitar', 'deshaz', 'deshacer', 'anula', 'anular']", "['borra', 'borrar', 'elimina', 'eliminar', 'quita', 'quitar', 'anula', 'anular']")
+
+          if 'queuePendingAction?:' not in s:
+            s = s.replace("""  imageData: { base64: string; mime: string } | null,
+  currentMessages: ChatMessage[]
+) {""", """  imageData: { base64: string; mime: string } | null,
+  currentMessages: ChatMessage[],
+  queuePendingAction?: (pending: PendingAction) => void
+) {""")
+
+          if 'if (looksLikeUndoRequest(message))' not in s:
+            s = s.replace("""  await addChatMessage(uid, { text: message, sender: 'user' });
+
+  const accounts = await ensureLocalAccounts(uid);""", """  await addChatMessage(uid, { text: message, sender: 'user' });
+
+  if (looksLikeUndoRequest(message)) {
+    const restored = await restoreLastDeletedTransaction(uid);
+    const reply = restored
+      ? `Listo, restauré ${restored.type === 'income' ? 'el ingreso' : 'el gasto'} de ${formatCOP(restored.amount)} (${restored.description}).`
+      : 'No encontré un movimiento borrado para restaurar.';
+    await addChatMessage(uid, { text: reply, sender: 'bot', emotionalTone: restored ? 'encouraging' : 'neutral' } as any);
+    return;
+  }
+
+  const accounts = await ensureLocalAccounts(uid);""")
+
+          s = s.replace("""      await deleteTransaction(uid, txToDelete.id);
+      summary = await getLocalMonthlySummary(uid);""", """      if (queuePendingAction) {
+        queuePendingAction({ kind: 'delete_transaction', transactionId: txToDelete.id, label: `${txToDelete.type === 'income' ? 'ingreso' : 'gasto'} de ${formatCOP(txToDelete.amount)} (${txToDelete.description})` });
+        await addChatMessage(uid, { text: `Antes de borrar, confirmo contigo: ¿elimino el ${txToDelete.type === 'income' ? 'ingreso' : 'gasto'} de ${formatCOP(txToDelete.amount)} (${txToDelete.description})? Responde “sí” o “no”.`, sender: 'bot', emotionalTone: 'alert' } as any);
+        return;
+      }
+      await deleteTransaction(uid, txToDelete.id);
+      summary = await getLocalMonthlySummary(uid);""", 1)
+
+          s = s.replace("""      await updateTransaction(uid, txToUpdate.id, {
+        amount: newAmount > 0 ? newAmount : txToUpdate.amount,
+        category: patch.category || txToUpdate.category,
+        description: patch.description || txToUpdate.description,
+      } as any);
+      summary = await getLocalMonthlySummary(uid);""", """      const nextAmount = newAmount > 0 ? newAmount : txToUpdate.amount;
+      const nextCategory = patch.category || txToUpdate.category;
+      const nextDescription = patch.description || txToUpdate.description;
+      if (queuePendingAction) {
+        queuePendingAction({ kind: 'update_transaction', transactionId: txToUpdate.id, amount: nextAmount, category: nextCategory, description: nextDescription, label: `${txToUpdate.description} -> ${formatCOP(nextAmount)}` });
+        await addChatMessage(uid, { text: `Voy a corregir “${txToUpdate.description}” y dejarlo en ${formatCOP(nextAmount)}. ¿Confirmas?`, sender: 'bot', emotionalTone: 'alert' } as any);
+        return;
+      }
+      await updateTransaction(uid, txToUpdate.id, {
+        amount: nextAmount,
+        category: nextCategory,
+        description: nextDescription,
+      } as any);
+      summary = await getLocalMonthlySummary(uid);""", 1)
+
+          if 'async function executePendingAction' not in s:
+            s = s.replace('export function ChatPage({ embedded = false }: ChatPageProps) {', """async function executePendingAction(uid: string, pending: PendingAction) {
+  if (pending.kind === 'delete_transaction' && pending.transactionId) {
+    await deleteTransaction(uid, pending.transactionId);
+    await addChatMessage(uid, { text: `Confirmado. Borré ${pending.label}. Puedes escribir “deshacer” si fue un error.`, sender: 'bot', emotionalTone: 'neutral' } as any);
+    return;
+  }
+  if (pending.kind === 'update_transaction' && pending.transactionId) {
+    await updateTransaction(uid, pending.transactionId, {
+      amount: pending.amount,
+      category: pending.category,
+      description: pending.description,
+    } as any);
+    await addChatMessage(uid, { text: `Confirmado. Corregí ${pending.label}.`, sender: 'bot', emotionalTone: 'encouraging' } as any);
+    return;
+  }
+  if (pending.kind === 'close_debt' && pending.debtId) {
+    await updateDebt(uid, pending.debtId, { status: 'paid', closedAt: new Date() });
+    await addChatMessage(uid, { text: `Confirmado. Marqué como pagada la ${pending.label}.`, sender: 'bot', emotionalTone: 'encouraging' } as any);
+  }
+}
+
+export function ChatPage({ embedded = false }: ChatPageProps) {""")
+
+          if 'const [pendingAction' not in s:
+            s = s.replace("""  const [selectedImage, setSelectedImage] = useState<{ base64: string; mime: string; preview: string } | null>(null);""", """  const [selectedImage, setSelectedImage] = useState<{ base64: string; mime: string; preview: string } | null>(null);
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);""")
+
+          s = s.replace("""      await runVercelDeepSeekChat(
+        user.uid,
+        finalMessage,
+        imageData ? { base64: imageData.base64, mime: imageData.mime } : null,
+        messages
+      );""", """      if (pendingAction && isPositiveConfirmation(finalMessage)) {
+        await addChatMessage(user.uid, { text: finalMessage, sender: 'user' });
+        await executePendingAction(user.uid, pendingAction);
+        setPendingAction(null);
+        return;
+      }
+      if (pendingAction && isNegativeConfirmation(finalMessage)) {
+        await addChatMessage(user.uid, { text: finalMessage, sender: 'user' });
+        await addChatMessage(user.uid, { text: 'Listo, cancelé la acción. No cambié nada.', sender: 'bot', emotionalTone: 'neutral' } as any);
+        setPendingAction(null);
+        return;
+      }
+      await runVercelDeepSeekChat(
+        user.uid,
+        finalMessage,
+        imageData ? { base64: imageData.base64, mime: imageData.mime } : null,
+        messages,
+        setPendingAction
+      );""", 1)
+
+          s = s.replace('className={`flex flex-col h-full min-h-0 bg-slate-900/40 relative', 'className={`flex flex-col h-full min-h-0 mobile-chat-height bg-slate-900/40 relative')
+          p.write_text(s, encoding='utf-8')
+          PY
+      - name: Validate
+        run: |
+          npm install
+          npm run build
+      - name: Commit
+        run: |
+          git config user.name "fundacionsocial-debug"
+          git config user.email "fundacionsocial@gimnasioemocionalmb.com"
+          git add src/pages/ChatPage.tsx
+          git commit -m "Add safe confirmations and undo to chat" || exit 0
+          git push
