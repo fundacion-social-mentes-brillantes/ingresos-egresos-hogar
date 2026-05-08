@@ -51,29 +51,40 @@ function mergeUnique(current: string[] = [], incoming: string[] = [], limit = 20
 }
 
 export async function getAiMemory(uid: string): Promise<AiMemoryProfile> {
-  const snap = await getDoc(doc(db, 'users', uid, 'aiMemory', 'profile'));
-  return normalizeMemory(snap.exists() ? snap.data() : undefined);
+  try {
+    const snap = await getDoc(doc(db, 'users', uid, 'aiMemory', 'profile'));
+    return normalizeMemory(snap.exists() ? snap.data() : undefined);
+  } catch (error) {
+    // Memory is helpful, but the assistant must still work if rules are pending.
+    console.debug('AI memory read skipped:', error);
+    return defaultMemory;
+  }
 }
 
 export async function updateAiMemory(uid: string, patch: Partial<AiMemoryProfile>) {
-  const current = await getAiMemory(uid);
-  const next: AiMemoryProfile = {
-    ...current,
-    ...patch,
-    financialGoals: mergeUnique(current.financialGoals, patch.financialGoals, 12),
-    sensitiveCategories: mergeUnique(current.sensitiveCategories, patch.sensitiveCategories, 12),
-    spendingPatterns: mergeUnique(current.spendingPatterns, patch.spendingPatterns, 20),
-    coachingNotes: mergeUnique(current.coachingNotes, patch.coachingNotes, 20),
-  };
+  try {
+    const current = await getAiMemory(uid);
+    const next: AiMemoryProfile = {
+      ...current,
+      ...patch,
+      financialGoals: mergeUnique(current.financialGoals, patch.financialGoals, 12),
+      sensitiveCategories: mergeUnique(current.sensitiveCategories, patch.sensitiveCategories, 12),
+      spendingPatterns: mergeUnique(current.spendingPatterns, patch.spendingPatterns, 20),
+      coachingNotes: mergeUnique(current.coachingNotes, patch.coachingNotes, 20),
+    };
 
-  await setDoc(
-    doc(db, 'users', uid, 'aiMemory', 'profile'),
-    {
-      ...next,
-      lastUpdatedAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
+    await setDoc(
+      doc(db, 'users', uid, 'aiMemory', 'profile'),
+      {
+        ...next,
+        lastUpdatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch (error) {
+    // Do not throw. Missing aiMemory permissions must never block chat actions.
+    console.debug('AI memory update skipped:', error);
+  }
 }
 
 export function memoryToContext(memory: AiMemoryProfile): string {
