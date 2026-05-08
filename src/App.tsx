@@ -7,6 +7,8 @@ import { ChatPage } from './pages/ChatPage';
 import { TransactionsPage } from './pages/TransactionsPage';
 import { ImportPage } from './pages/ImportPage';
 import { DebtsPage } from './pages/DebtsPage';
+import { ReportsPage } from './pages/ReportsPage';
+import { BackupPage } from './pages/BackupPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { Loader2 } from 'lucide-react';
 
@@ -60,6 +62,18 @@ function AppRoutes() {
       <Route path="/import" element={
         <ProtectedRoute>
           <ImportPage />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/reports" element={
+        <ProtectedRoute>
+          <ReportsPage />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/backup" element={
+        <ProtectedRoute>
+          <BackupPage />
         </ProtectedRoute>
       } />
       
