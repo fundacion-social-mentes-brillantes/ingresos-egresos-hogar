@@ -3,42 +3,42 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // Helper to check if user is authenticated and is the owner of the data
     function isOwner(userId) {
       return request.auth != null && request.auth.uid == userId;
     }
 
-    // User profiles: Only the user can read/write their own profile
     match /users/{userId} {
       allow read, write: if isOwner(userId);
       
-      // Transactions: Isolated by user
       match /transactions/{transactionId} {
         allow read, write: if isOwner(userId);
       }
       
-      // Accounts: Isolated by user
       match /accounts/{accountId} {
         allow read, write: if isOwner(userId);
       }
       
-      // Chat history: Isolated by user
       match /chatMessages/{messageId} {
         allow read, write: if isOwner(userId);
       }
 
-      // Debts and loans: Isolated by user
       match /debts/{debtId} {
         allow read, write: if isOwner(userId);
       }
+
+      match /deletedTransactions/{deletedId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /backupExports/{backupId} {
+        allow read, write: if isOwner(userId);
+      }
       
-      // Settings: Isolated by user
       match /settings/{settingId} {
         allow read, write: if isOwner(userId);
       }
     }
     
-    // Deny everything else
     match /{document=**} {
       allow read, write: if false;
     }
