@@ -11,17 +11,25 @@ import {
   Wallet, 
   Tag, 
   Plus,
-  DollarSign
+  DollarSign,
+  Moon,
+  ShieldCheck,
+  Sun
 } from 'lucide-react';
 
 export function SettingsPage() {
   const { user } = useAuth();
   const { accounts, refresh } = useTransactions();
   const [loading, setLoading] = useState<string | null>(null);
-  
-  // New account form
+  const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
   const [showAdd, setShowAdd] = useState(false);
   const [newAcc, setNewAcc] = useState({ name: '', type: 'cash' as AccountType, balance: 0 });
+
+  const handleThemeChange = (value: 'dark' | 'light') => {
+    localStorage.setItem('theme', value);
+    setTheme(value);
+    document.body.classList.toggle('theme-light', value === 'light');
+  };
 
   const handleAddAccount = async () => {
     if (!user || !newAcc.name) return;
@@ -49,7 +57,6 @@ export function SettingsPage() {
         <p className="text-slate-400 text-sm">Personaliza tu experiencia financiera</p>
       </div>
 
-      {/* Profile Section */}
       <section className="space-y-4">
         <div className="flex items-center gap-2 text-slate-300 font-semibold">
           <User className="w-5 h-5 text-blue-400" />
@@ -69,19 +76,30 @@ export function SettingsPage() {
         </Card>
       </section>
 
-      {/* Accounts Section */}
+      <section className="space-y-4">
+        <div className="flex items-center gap-2 text-slate-300 font-semibold">
+          <ShieldCheck className="w-5 h-5 text-blue-400" />
+          <h2>Modo profesional</h2>
+        </div>
+        <Card className="grid gap-4 sm:grid-cols-2 sm:items-center">
+          <div>
+            <p className="font-bold text-slate-100">Modo claro / oscuro</p>
+            <p className="mt-1 text-sm text-slate-500">Cambia la apariencia según donde estés trabajando.</p>
+          </div>
+          <div className="flex gap-2 sm:justify-end">
+            <Button size="sm" variant={theme === 'dark' ? 'primary' : 'ghost'} icon={<Moon className="w-4 h-4" />} onClick={() => handleThemeChange('dark')}>Oscuro</Button>
+            <Button size="sm" variant={theme === 'light' ? 'primary' : 'ghost'} icon={<Sun className="w-4 h-4" />} onClick={() => handleThemeChange('light')}>Claro</Button>
+          </div>
+        </Card>
+      </section>
+
       <section className="space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-slate-300 font-semibold">
             <Wallet className="w-5 h-5 text-blue-400" />
             <h2>Cuentas</h2>
           </div>
-          <Button 
-            size="sm" 
-            variant="ghost" 
-            icon={<Plus className="w-4 h-4" />}
-            onClick={() => setShowAdd(!showAdd)}
-          >
+          <Button size="sm" variant="ghost" icon={<Plus className="w-4 h-4" />} onClick={() => setShowAdd(!showAdd)}>
             Nueva
           </Button>
         </div>
@@ -90,30 +108,9 @@ export function SettingsPage() {
           <Card className="animate-fade-in border-blue-500/30">
             <h3 className="text-sm font-bold text-slate-200 mb-4">Agregar nueva cuenta</h3>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-              <Input 
-                label="Nombre" 
-                placeholder="Ej: Daviplata" 
-                value={newAcc.name}
-                onChange={e => setNewAcc({...newAcc, name: e.target.value})}
-              />
-              <Select 
-                label="Tipo" 
-                options={[
-                  { value: 'cash', label: 'Efectivo' },
-                  { value: 'nequi', label: 'Nequi' },
-                  { value: 'daviplata', label: 'Daviplata' },
-                  { value: 'bank', label: 'Banco' },
-                  { value: 'other', label: 'Otro' },
-                ]}
-                value={newAcc.type}
-                onChange={e => setNewAcc({...newAcc, type: e.target.value as AccountType})}
-              />
-              <Input 
-                label="Saldo inicial" 
-                type="number" 
-                value={newAcc.balance}
-                onChange={e => setNewAcc({...newAcc, balance: Number(e.target.value)})}
-              />
+              <Input label="Nombre" placeholder="Ej: Daviplata" value={newAcc.name} onChange={e => setNewAcc({...newAcc, name: e.target.value})} />
+              <Select label="Tipo" options={[{ value: 'cash', label: 'Efectivo' }, { value: 'nequi', label: 'Nequi' }, { value: 'daviplata', label: 'Daviplata' }, { value: 'bank', label: 'Banco' }, { value: 'other', label: 'Otro' }]} value={newAcc.type} onChange={e => setNewAcc({...newAcc, type: e.target.value as AccountType})} />
+              <Input label="Saldo inicial" type="number" value={newAcc.balance} onChange={e => setNewAcc({...newAcc, balance: Number(e.target.value)})} />
             </div>
             <div className="flex justify-end gap-2">
               <Button size="sm" variant="ghost" onClick={() => setShowAdd(false)}>Cancelar</Button>
@@ -143,7 +140,6 @@ export function SettingsPage() {
         </div>
       </section>
 
-      {/* Categories Section */}
       <section className="space-y-4">
         <div className="flex items-center gap-2 text-slate-300 font-semibold">
           <Tag className="w-5 h-5 text-blue-400" />
@@ -151,10 +147,7 @@ export function SettingsPage() {
         </div>
         <div className="flex flex-wrap gap-2">
           {CATEGORIES.map(cat => (
-            <span 
-              key={cat}
-              className="px-4 py-2 rounded-xl bg-slate-800/60 border border-slate-700/50 text-sm text-slate-300"
-            >
+            <span key={cat} className="px-4 py-2 rounded-xl bg-slate-800/60 border border-slate-700/50 text-sm text-slate-300">
               {cat}
             </span>
           ))}
