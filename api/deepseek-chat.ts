@@ -14,9 +14,9 @@ function extractJsonObject(content: string): string {
 
 function safeHistory(history: any[]): any[] {
   if (!Array.isArray(history)) return [];
-  return history.slice(-30).map((m) => ({
+  return history.slice(-18).map((m) => ({
     role: m?.sender === 'bot' ? 'assistant' : 'user',
-    content: String(m?.text || '').slice(0, 2500),
+    content: String(m?.text || '').slice(0, 1800),
   }));
 }
 
@@ -72,6 +72,9 @@ export default async function handler(req: any, res: any) {
   const excelContextBlock = excelImportContext
     ? `\n\nEXCEL ADJUNTO POR EL USUARIO:\n${String(excelImportContext).slice(0, 12000)}\n\nAnaliza este Excel como migracion financiera. Explica ingresos, gastos, balance, filas dudosas y pregunta si quiere guardar/importar. No digas que ya guardaste si aun no confirmo.`
     : '';
+  const imageContextBlock = hasImage
+    ? '\n\nNOTA TECNICA: El usuario adjunto una imagen, pero este endpoint de DeepSeek V4 Pro solo acepta texto. No intentes procesar la imagen ni inventes su contenido. Pidele al usuario que escriba el valor, cuenta, persona o movimiento que aparece en la imagen.'
+    : '';
 
   const systemPrompt = `
 Eres el copiloto financiero principal de "Ingresos y Egresos Hogar".
@@ -107,7 +110,10 @@ COMO DEBES PENSAR ANTES DE RESPONDER
 6. Si puedes crear memoria util sobre metas, tono, patrones o preocupaciones, devuelvela en memoryPatch.
 
 REGLA CRITICA DE SEGURIDAD
-La app cliente exige confirmacion visual antes de ejecutar acciones peligrosas. Cuando la intencion sea borrar, corregir, registrar abonos o cerrar deudas, describe exactamente que se tocaria. Si hay ambiguedad, usa clarify. No digas que ya borraste/corregiste/cerraste; la ejecucion la hace la app luego de confirmar.
+La app cliente ejecuta acciones concretas, no tus promesas. NUNCA digas "ya borre", "ya corregi", "voy a borrar varios" o "queda actualizado" si la accion real no esta soportada por el JSON y por el cliente.
+Acciones soportadas por el cliente hoy: crear UN movimiento, crear UNA deuda, consultar, sugerir, pedir aclaracion, borrar/corregir UN movimiento claro con confirmacion, abonar/cerrar UNA deuda clara con confirmacion.
+Si el usuario pide limpiar duplicados, borrar varios ingresos, mover todos los saldos o reconstruir cuentas, NO uses create_transaction para simularlo. Usa clarify o financial_advice y explica que se debe hacer con un flujo de limpieza guiado. No afirmes que ya se hizo.
+Cuando la intencion sea borrar, corregir, registrar abonos o cerrar deudas, describe exactamente que se tocaria. Si hay ambiguedad, usa clarify. No digas que ya borraste/corregiste/cerraste; la ejecucion la hace la app luego de confirmar.
 "deshacer" debe tratarse como conversation_only o clarify; la app restaurara el ultimo borrado, no pidas borrar.
 
 FORMATO TECNICO OBLIGATORIO
@@ -153,6 +159,7 @@ REGLAS DE INTENCION
 - "cambia ese gasto a 80 mil", "corrige el ultimo ingreso" => update_transaction.
 - "borra eso", "borra el anterior" => delete_transaction solo si el objetivo es claro; si no, clarify.
 - Si pregunta "como voy", "analiza", "que recomiendas" => query_summary, analyze_behavior o financial_advice con datos reales.
+- Si pide borrar varios, limpiar duplicados o dejar solo un saldo/cuenta especifica, NO prometas ejecucion masiva. Usa clarify/financial_advice con una instruccion precisa para revisar Movimientos o pedir confirmacion de una operacion soportada.
 
 REGLAS DE RESPUESTA HUMANA
 - No repitas siempre "Listo". Varía natural.
@@ -163,19 +170,25 @@ REGLAS DE RESPUESTA HUMANA
 - Si faltan datos, pregunta una sola cosa clara.
 
 MEMORIA ACTUAL DEL USUARIO
-${String(aiMemory || 'Sin memoria guardada todavia').slice(0, 6000)}
+${String(aiMemory || 'Sin memoria guardada todavia').slice(0, 5000)}
 
 DIAGNOSTICO FINANCIERO PRECALCULADO
-${String(diagnosticContext || 'Sin diagnostico precalculado').slice(0, 8000)}
+${String(diagnosticContext || 'Sin diagnostico precalculado').slice(0, 6500)}
 
 CONTEXTO FINANCIERO REAL DE LA APP
-${String(context || 'Sin contexto disponible').slice(0, 18000)}
+${String(context || 'Sin contexto disponible').slice(0, 14000)}
 ${excelContextBlock}
+${imageContextBlock}
 `;
 
-  const finalUserMessage = hasImage
-    ? { role: 'user', content: [{ type: 'text', text: message }, { type: 'image_url', image_url: { url: `data:${imageMimeType};base64,${imageBase64}` } }] }
-    : { role: 'user', content: message };
+  // DeepSeek V4 Pro text endpoint rejects OpenAI-style image_url content.
+  // Keep the payload text-only so the assistant never crashes when the UI has an image selected.
+  const finalUserMessage = {
+    role: 'user',
+    content: hasImage
+      ? `${message}\n\n[El usuario adjunto una imagen, pero esta ruta solo procesa texto. Pide los datos escritos si la imagen es necesaria.]`
+      : message,
+  };
 
   const payload = {
     model: 'deepseek-v4-pro',
@@ -183,8 +196,8 @@ ${excelContextBlock}
     response_format: { type: 'json_object' },
     thinking: { type: 'enabled' },
     reasoning_effort: 'high',
-    temperature: 0.82,
-    max_tokens: 8192,
+    temperature: 0.78,
+    max_tokens: 4096,
   };
 
   try {
