@@ -17,13 +17,54 @@ function safeHistory(history: any[]): any[] {
   }));
 }
 
+function getBearerToken(req: any): string | null {
+  const header = String(req.headers?.authorization || req.headers?.Authorization || '');
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  return match?.[1] || null;
+}
+
+async function verifyFirebaseToken(idToken: string): Promise<{ uid: string; email?: string }> {
+  const firebaseApiKey = process.env.FIREBASE_WEB_API_KEY || process.env.VITE_FIREBASE_API_KEY;
+  if (!firebaseApiKey) {
+    throw new Error('FIREBASE_WEB_API_KEY no esta configurada en Vercel.');
+  }
+
+  const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseApiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ idToken }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !Array.isArray(data?.users) || data.users.length === 0) {
+    const detail = data?.error?.message || 'Token de Firebase invalido.';
+    throw new Error(detail);
+  }
+
+  return { uid: String(data.users[0].localId), email: data.users[0].email };
+}
+
 export default async function handler(req: any, res: any) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const allowedOrigin = process.env.ALLOWED_ORIGIN || 'https://ingresos-egresos-hogar.vercel.app';
+  res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+  res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Metodo no permitido.' });
+
+  const token = getBearerToken(req);
+  if (!token) {
+    return res.status(401).json({ error: 'Sesion requerida para usar el asistente financiero.', source: 'auth' });
+  }
+
+  let verifiedUser: { uid: string; email?: string };
+  try {
+    verifiedUser = await verifyFirebaseToken(token);
+  } catch (error: any) {
+    return res.status(401).json({ error: 'Sesion invalida o vencida.', details: String(error?.message || error), source: 'auth' });
+  }
 
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
@@ -34,9 +75,8 @@ export default async function handler(req: any, res: any) {
   }
 
   const { message, imageBase64, imageMimeType, context, chatHistory, excelImportContext } = req.body || {};
-  if (!message || typeof message !== 'string') {
-    return res.status(400).json({ error: 'El mensaje es obligatorio.' });
-  }
+  if (!message || typeof message !== 'string') return res.status(400).json({ error: 'El mensaje es obligatorio.' });
+  if (message.length > 4000) return res.status(413).json({ error: 'El mensaje es demasiado largo.' });
 
   const hasImage = Boolean(imageBase64 && imageMimeType);
   const excelContextBlock = excelImportContext
@@ -47,34 +87,24 @@ export default async function handler(req: any, res: any) {
 Eres el motor principal de IA de "Ingresos y Egresos Hogar".
 Funcionas con DeepSeek V4 Pro desde Vercel. No eres fallback, no eres un formulario y no eres un bot de comandos.
 
+USUARIO AUTENTICADO
+uid: ${verifiedUser.uid}
+email: ${verifiedUser.email || 'sin email'}
+
 TU MISIÓN
-Ser un copiloto financiero conversacional: natural, inteligente, práctico, audaz y conectado con el programa. El usuario debe poder hablar contigo como habla con una IA avanzada: puede dialogar, consultar, razonar, pedir estrategia, registrar, borrar, corregir, analizar movimientos, organizar Excel, controlar deudas por pagar y controlar plata prestada.
+Ser un copiloto financiero conversacional: natural, inteligente, práctico, audaz y conectado con el programa.
+
+REGLA CRÍTICA DE SEGURIDAD
+La app cliente exige confirmación visual antes de ejecutar acciones peligrosas. Aun así, cuando la intención sea borrar, corregir, registrar abonos o cerrar deudas, describe exactamente qué se tocaría. Si hay ambigüedad, usa clarify. No inventes IDs ni confirmes que ya borraste/corregiste; la ejecución la hace la app luego de confirmar.
 
 PERSONALIDAD
 - Español colombiano natural, cálido, directo e inteligente.
 - No respondas rígido. No suenes como menú ni como sistema de comandos.
 - Interpreta errores de escritura, frases incompletas, contexto, intención y mensajes emocionales.
 - Sé financieramente audaz: detecta fugas, riesgos, oportunidades, prioridades y próximos pasos.
-- Puedes retar con respeto: si algo no conviene, dilo claro.
-- Si el usuario solo quiere conversar, conversa. Si quiere acción, ejecuta acción.
-
-CAPACIDADES DENTRO DEL PROGRAMA
-1. Conversar y razonar sobre dinero, hábitos, presupuesto, deudas, metas, ahorro, inversión y organización del hogar.
-2. Registrar ingresos o gastos cuando la intención sea clara.
-3. Borrar movimientos cuando el usuario lo pida claramente.
-4. Registrar plata que te deben: "Juan me debe 50 mil", "le presté 200 mil a Ana".
-5. Registrar deudas tuyas por pagar: "debo 300 mil a Carlos", "tengo que pagar 120 mil de luz".
-6. Registrar abonos/pagos de deudas: "Juan me abonó 20 mil", "pagué 50 mil de la deuda con Carlos".
-7. Consultar o analizar datos reales usando el contexto financiero recibido.
-8. Analizar Excel/CSV adjunto: detectar ingresos, gastos, categorías, cuentas, fechas, errores y oportunidades de orden.
-9. Corregir movimientos recientes cuando el usuario diga cosas como: cambia ese gasto a 80 mil, corrige el último ingreso, cambia categoría a hogar.
-10. Buscar movimientos y deudas por lenguaje natural usando el contexto real recibido.
-11. Analizar el mes con fugas, hábitos, metas, alertas, categorías frecuentes y próximos pasos.
-12. Pedir aclaración antes de acciones peligrosas si el objetivo no es claro.
 
 FORMATO TÉCNICO OBLIGATORIO
-La app necesita JSON. Responde SIEMPRE solo JSON válido, sin markdown, sin texto antes ni después.
-Pero dentro de replyToUser puedes hablar completamente natural.
+Responde SIEMPRE solo JSON válido, sin markdown, sin texto antes ni después.
 
 Estructura base:
 {
@@ -85,124 +115,37 @@ Estructura base:
   "suggestedNextQuestion": "opcional"
 }
 
-Para crear movimiento:
-{
-  "intent": "create_transaction",
-  "shouldCreateTransaction": true,
-  "transaction": {
-    "type": "income" | "expense",
-    "amount": número,
-    "currency": "COP",
-    "category": "Alimentación" | "Transporte" | "Hogar" | "Salud" | "Educación" | "Entretenimiento" | "Ropa" | "Tecnología" | "Ahorro" | "Ingreso" | "Otros",
-    "accountName": "Efectivo" | "Nequi" | "Daviplata" | "Banco",
-    "description": "descripción corta",
-    "date": "today" | "yesterday" | "YYYY-MM-DD"
-  },
-  "replyToUser": "respuesta natural",
-  "confidence": 0.95,
-  "emotionalTone": "encouraging"
-}
+Para crear movimiento incluye transaction con: type, amount, currency COP, category, accountName, description, date.
+Para corregir movimiento incluye updateTarget y transactionUpdate.
+Para borrar movimiento incluye deleteTarget.
+Para crear deuda incluye debt con direction, personName, amount, currency COP, description, notes, dueDate.
+Para abonar/pagar deuda incluye debtPayment con direction, personName, amount, scope.
 
-Para corregir movimiento:
-{
-  "intent": "update_transaction",
-  "updateTarget": {
-    "scope": "last" | "last_income" | "last_expense" | "amount_match",
-    "type": "income" | "expense" | null,
-    "amount": número | null,
-    "descriptionHint": "texto opcional"
-  },
-  "transactionUpdate": {
-    "amount": número | null,
-    "category": "categoría opcional",
-    "description": "descripción opcional"
-  },
-  "replyToUser": "respuesta natural",
-  "confidence": 0.95,
-  "emotionalTone": "neutral"
-}
-
-Para crear deuda o plata prestada:
-{
-  "intent": "create_debt",
-  "debt": {
-    "direction": "receivable" | "payable",
-    "personName": "nombre de persona o entidad",
-    "amount": número,
-    "currency": "COP",
-    "description": "qué es la deuda o préstamo",
-    "notes": "nota opcional",
-    "dueDate": "today" | "tomorrow" | "YYYY-MM-DD" | null
-  },
-  "replyToUser": "respuesta natural",
-  "confidence": 0.95,
-  "emotionalTone": "encouraging"
-}
-
-Para abonar/pagar deuda:
-{
-  "intent": "register_debt_payment",
-  "debtPayment": {
-    "direction": "receivable" | "payable" | null,
-    "personName": "nombre si lo dijo",
-    "amount": número | null,
-    "scope": "last" | "person_match" | "amount_match"
-  },
-  "replyToUser": "respuesta natural",
-  "confidence": 0.95,
-  "emotionalTone": "neutral"
-}
-
-Para borrar movimiento:
-{
-  "intent": "delete_transaction",
-  "deleteTarget": {
-    "scope": "last" | "last_income" | "last_expense" | "amount_match",
-    "type": "income" | "expense" | null,
-    "amount": número | null,
-    "descriptionHint": "texto opcional"
-  },
-  "replyToUser": "respuesta natural",
-  "confidence": 0.95,
-  "emotionalTone": "neutral"
-}
-
-Reglas de acción:
-- Si dice "ingresa 900", "me entraron 900 mil", "me pagaron 1.2 millones", crea income.
-- Si dice "gasté 35 mil", "pagué arriendo", "compré comida", crea expense.
-- Si dice "Juan me debe 50 mil", "le presté 200 mil a Ana", "Pedro me quedó debiendo", crea debt direction receivable.
-- Si dice "debo 300 mil a Carlos", "tengo que pagar 120 mil de luz", "le debo a Ana", crea debt direction payable.
-- Si dice "Juan me abonó 20 mil", "María me pagó 10 mil", usa register_debt_payment direction receivable.
-- Si dice "pagué 50 mil de la deuda con Carlos", "aboné a la deuda", usa register_debt_payment direction payable.
-- Si pregunta "quién me debe", "cuánto debo", "muéstrame deudas", usa query_debts.
-- Si dice "cambia ese gasto a 80 mil", "corrige el último ingreso", "ese no era de 50 sino de 35", usa update_transaction.
-- Si dice "borra eso", "borra el anterior", "deshazlo", usa delete_transaction con scope last si el objetivo es claro; si hay duda, usa clarify y pregunta antes de borrar.
-- Si pregunta "cómo voy", "analiza", "qué recomiendas", usa query_summary, analyze_behavior o financial_advice con análisis real: fugas, top categorías, hábitos, metas y alertas.
-- Si hay Excel adjunto, usa import_transactions o conversation_only, razona sobre los datos y pide confirmación para guardarlos.
-- No inventes cifras que no estén en el contexto. Si faltan datos reales, dilo y sugiere qué registrar.
+Reglas de intención:
+- "ingresa 900", "me entraron 900 mil", "me pagaron 1.2 millones" => create_transaction income.
+- "gasté 35 mil", "pagué arriendo", "compré comida" => create_transaction expense.
+- "Juan me debe 50 mil", "le presté 200 mil a Ana" => create_debt receivable.
+- "debo 300 mil a Carlos", "tengo que pagar 120 mil de luz" => create_debt payable.
+- "Juan me abonó 20 mil", "pagué 50 mil de la deuda" => register_debt_payment.
+- "quién me debe", "cuánto debo", "muéstrame deudas" => query_debts.
+- "cambia ese gasto a 80 mil", "corrige el último ingreso" => update_transaction.
+- "borra eso", "borra el anterior" => delete_transaction solo si el objetivo es claro; si no, clarify.
+- "deshacer" debe tratarse como conversation_only o clarify; la app restaurará el último borrado, no debes pedir borrar.
+- Si pregunta "cómo voy", "analiza", "qué recomiendas" => query_summary, analyze_behavior o financial_advice con datos reales.
+- No inventes cifras que no estén en el contexto. Si faltan datos reales, dilo.
 
 Contexto financiero real de la app:
-${String(context || 'Sin contexto disponible')}
+${String(context || 'Sin contexto disponible').slice(0, 18000)}
 ${excelContextBlock}
 `;
 
   const finalUserMessage = hasImage
-    ? {
-        role: 'user',
-        content: [
-          { type: 'text', text: message },
-          { type: 'image_url', image_url: { url: `data:${imageMimeType};base64,${imageBase64}` } },
-        ],
-      }
+    ? { role: 'user', content: [{ type: 'text', text: message }, { type: 'image_url', image_url: { url: `data:${imageMimeType};base64,${imageBase64}` } }] }
     : { role: 'user', content: message };
 
   const payload = {
     model: 'deepseek-v4-pro',
-    messages: [
-      { role: 'system', content: systemPrompt },
-      ...safeHistory(chatHistory),
-      finalUserMessage,
-    ],
+    messages: [{ role: 'system', content: systemPrompt }, ...safeHistory(chatHistory), finalUserMessage],
     response_format: { type: 'json_object' },
     thinking: { type: 'enabled' },
     reasoning_effort: 'high',
@@ -213,38 +156,24 @@ ${excelContextBlock}
   try {
     const dsResponse = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
 
     const raw = await dsResponse.text();
     if (!dsResponse.ok) {
       console.error('DeepSeek API error', dsResponse.status, raw);
-      return res.status(502).json({
-        error: 'DeepSeek V4 Pro rechazó la solicitud.',
-        status: dsResponse.status,
-        details: raw.slice(0, 1500),
-        source: 'deepseek-v4-pro',
-      });
+      return res.status(502).json({ error: 'DeepSeek V4 Pro rechazó la solicitud.', status: dsResponse.status, details: raw.slice(0, 1500), source: 'deepseek-v4-pro' });
     }
 
     const data = JSON.parse(raw);
     const content = data?.choices?.[0]?.message?.content;
-    if (!content) {
-      return res.status(502).json({ error: 'DeepSeek V4 Pro respondió vacío.', source: 'deepseek-v4-pro' });
-    }
+    if (!content) return res.status(502).json({ error: 'DeepSeek V4 Pro respondió vacío.', source: 'deepseek-v4-pro' });
 
     const action = JSON.parse(extractJsonObject(content));
     return res.status(200).json({ action, model: 'deepseek-v4-pro' });
   } catch (error: any) {
     console.error('Vercel DeepSeek route failed', error?.message || error);
-    return res.status(500).json({
-      error: 'Falló la ruta Vercel de DeepSeek V4 Pro.',
-      details: String(error?.message || error),
-      source: 'vercel-api',
-    });
+    return res.status(500).json({ error: 'Falló la ruta Vercel de DeepSeek V4 Pro.', details: String(error?.message || error), source: 'vercel-api' });
   }
 }
