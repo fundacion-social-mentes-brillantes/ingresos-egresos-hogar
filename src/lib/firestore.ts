@@ -19,7 +19,16 @@ import {
   increment,
 } from 'firebase/firestore';
 import { db } from './firebase';
-import type { Transaction, Account, ChatMessage, AppSettings, UserProfile, Debt } from '../types';
+import type {
+  Transaction,
+  Account,
+  ChatMessage,
+  AppSettings,
+  UserProfile,
+  Debt,
+  DeletedTransaction,
+  ActionLog,
+} from '../types';
 
 // -- Path helpers ------------------------------------------------------------
 const userRef = (uid: string) => doc(db, 'users', uid);
@@ -32,6 +41,7 @@ const debtRef = (uid: string, id: string) => doc(db, 'users', uid, 'debts', id);
 const accCol = (uid: string) => collection(db, 'users', uid, 'accounts');
 const accRef = (uid: string, id: string) => doc(db, 'users', uid, 'accounts', id);
 const chatCol = (uid: string) => collection(db, 'users', uid, 'chatMessages');
+const actionLogCol = (uid: string) => collection(db, 'users', uid, 'actionLogs');
 const settRef = (uid: string) => doc(db, 'users', uid, 'settings', 'app');
 
 function cleanUndefinedFields<T extends Record<string, unknown>>(data: T): Partial<T> {
@@ -68,6 +78,17 @@ function normalizeTransaction(id: string, data: Record<string, any>): Transactio
   } as Transaction;
 }
 
+function normalizeDeletedTransaction(id: string, data: Record<string, any>): DeletedTransaction {
+  const originalId = String(data.originalId || id);
+  return {
+    ...normalizeTransaction(originalId, data),
+    deletedId: id,
+    originalId,
+    deletedAt: toDate(data.deletedAt),
+    recoverable: data.recoverable ?? true,
+  } as DeletedTransaction;
+}
+
 function normalizeDebt(id: string, data: Record<string, any>): Debt {
   const amountOriginal = Number(data.amountOriginal || 0);
   const amountPaid = Number(data.amountPaid || 0);
@@ -84,6 +105,14 @@ function normalizeDebt(id: string, data: Record<string, any>): Debt {
     createdAt: toDate(data.createdAt),
     updatedAt: toDate(data.updatedAt),
   } as Debt;
+}
+
+function normalizeActionLog(id: string, data: Record<string, any>): ActionLog {
+  return {
+    id,
+    ...data,
+    createdAt: toDate(data.createdAt),
+  } as ActionLog;
 }
 
 // -- User profile ------------------------------------------------------------
@@ -213,7 +242,7 @@ export async function updateTransaction(uid: string, id: string, data: Partial<T
 
 export async function deleteTransaction(uid: string, id: string) {
   const current = await getDoc(txRef(uid, id));
-  if (!current.exists()) return;
+  if (!current.exists()) return null;
 
   const tx = current.data() as Partial<Transaction>;
   const batch = writeBatch(db);
@@ -235,15 +264,20 @@ export async function deleteTransaction(uid: string, id: string) {
   }
 
   await batch.commit();
+  return deletedRef.id;
 }
 
-export async function restoreLastDeletedTransaction(uid: string): Promise<Transaction | null> {
-  const snap = await getDocs(query(deletedTxCol(uid), orderBy('deletedAt', 'desc'), limit(1)));
-  const deleted = snap.docs[0];
-  if (!deleted) return null;
+export async function getDeletedTransactions(uid: string, limitCount = 25): Promise<DeletedTransaction[]> {
+  const snap = await getDocs(query(deletedTxCol(uid), orderBy('deletedAt', 'desc'), limit(limitCount)));
+  return snap.docs.map((d) => normalizeDeletedTransaction(d.id, d.data()));
+}
 
-  const data = deleted.data() as Record<string, any>;
-  const originalId = String(data.originalId || deleted.id);
+export async function restoreDeletedTransaction(uid: string, deletedId: string): Promise<Transaction | null> {
+  const deletedSnap = await getDoc(deletedTxRef(uid, deletedId));
+  if (!deletedSnap.exists()) return null;
+
+  const data = deletedSnap.data() as Record<string, any>;
+  const originalId = String(data.originalId || deletedSnap.id);
   const restoredData = { ...data };
   delete restoredData.originalId;
   delete restoredData.deletedAt;
@@ -256,7 +290,7 @@ export async function restoreLastDeletedTransaction(uid: string): Promise<Transa
     restoredAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
-  batch.delete(deletedTxRef(uid, deleted.id));
+  batch.delete(deletedTxRef(uid, deletedSnap.id));
 
   if (restored.accountId && restored.amount && restored.type) {
     const balanceChange = restored.type === 'income' ? restored.amount : -restored.amount;
@@ -268,6 +302,13 @@ export async function restoreLastDeletedTransaction(uid: string): Promise<Transa
 
   await batch.commit();
   return restored;
+}
+
+export async function restoreLastDeletedTransaction(uid: string): Promise<Transaction | null> {
+  const snap = await getDocs(query(deletedTxCol(uid), orderBy('deletedAt', 'desc'), limit(1)));
+  const deleted = snap.docs[0];
+  if (!deleted) return null;
+  return restoreDeletedTransaction(uid, deleted.id);
 }
 
 // -- Debts and loans ---------------------------------------------------------
@@ -329,6 +370,16 @@ export async function getChatMessages(uid: string, limitCount = 50): Promise<Cha
 
 export async function addChatMessage(uid: string, data: Omit<ChatMessage, 'id' | 'createdAt'>) {
   return addDoc(chatCol(uid), cleanUndefinedFields({ ...data, createdAt: serverTimestamp() }));
+}
+
+// -- Action logs -------------------------------------------------------------
+export async function addActionLog(uid: string, data: Omit<ActionLog, 'id' | 'createdAt'>) {
+  return addDoc(actionLogCol(uid), cleanUndefinedFields({ ...data, createdAt: serverTimestamp() }));
+}
+
+export async function getActionLogs(uid: string, limitCount = 50): Promise<ActionLog[]> {
+  const snap = await getDocs(query(actionLogCol(uid), orderBy('createdAt', 'desc'), limit(limitCount)));
+  return snap.docs.map((d) => normalizeActionLog(d.id, d.data()));
 }
 
 // -- Settings ----------------------------------------------------------------
