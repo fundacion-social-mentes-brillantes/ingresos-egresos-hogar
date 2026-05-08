@@ -4,6 +4,20 @@ declare const process: {
 
 type FastTransactionType = 'income' | 'expense';
 
+type LocalAction = {
+  intent: string;
+  replyToUser: string;
+  confidence: number;
+  assistantMode: string;
+  riskLevel: string;
+  emotionalTone: string;
+  insights: Array<{ title: string; detail: string; severity: string }>;
+  suggestedActions: string[];
+  suggestedNextQuestion: string;
+  memoryPatch: Record<string, unknown>;
+  transaction?: Record<string, unknown>;
+};
+
 function extractJsonObject(content: string): string {
   const trimmed = String(content || '').trim();
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -16,9 +30,9 @@ function extractJsonObject(content: string): string {
 
 function safeHistory(history: any[]): any[] {
   if (!Array.isArray(history)) return [];
-  return history.slice(-18).map((m) => ({
+  return history.slice(-12).map((m) => ({
     role: m?.sender === 'bot' ? 'assistant' : 'user',
-    content: String(m?.text || '').slice(0, 1800),
+    content: String(m?.text || '').slice(0, 1200),
   }));
 }
 
@@ -33,7 +47,59 @@ function normalizePlainText(value: string): string {
     .toLowerCase()
     .trim()
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '');
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+function localConversation(replyToUser: string, mode = 'conversacion', suggestedActions: string[] = []): LocalAction {
+  return {
+    intent: 'conversation_only',
+    replyToUser,
+    confidence: 0.99,
+    assistantMode: mode,
+    riskLevel: 'low',
+    emotionalTone: 'friendly',
+    insights: [],
+    suggestedActions,
+    suggestedNextQuestion: '',
+    memoryPatch: {},
+  };
+}
+
+function buildCheapLocalConversation(message: string, hasImage: boolean): LocalAction | null {
+  const text = normalizePlainText(message);
+
+  if (hasImage) {
+    return localConversation(
+      'Vi que adjuntaste una imagen, pero esta versión de DeepSeek trabaja mejor con texto. Escríbeme el valor, la cuenta o el movimiento que aparece ahí y lo registro o lo analizo.',
+      'explicacion',
+      ['Escribir el valor o movimiento de la imagen']
+    );
+  }
+
+  const greetings = ['hola', 'holaa', 'buenas', 'buenos dias', 'buenas tardes', 'buenas noches', 'hey', 'ola'];
+  if (greetings.includes(text)) {
+    return localConversation('¡Hola! Estoy listo. Puedes escribir algo como “gasté 5 mil en papitas”, “me pagaron 80 mil” o preguntarme cómo vas este mes.');
+  }
+
+  const thanks = ['gracias', 'muchas gracias', 'listo gracias', 'ok gracias', 'perfecto gracias'];
+  if (thanks.includes(text)) {
+    return localConversation('Con gusto. Cuando quieras registrar otro movimiento o revisar cómo vas, me escribes.');
+  }
+
+  if (['ok', 'okay', 'dale', 'listo', 'perfecto', 'bueno'].includes(text)) {
+    return localConversation('Listo. Quedo atento a lo que quieras registrar o revisar.');
+  }
+
+  if (text === 'que puedes hacer' || text === 'que haces' || text === 'ayuda' || text === 'como funciona') {
+    return localConversation(
+      'Puedo ayudarte de dos formas: rápido registro ingresos y gastos simples sin gastar DeepSeek, por ejemplo “gasté 1.000 en papitas” o “me pagaron 50 mil”. Y cuando pidas análisis, planes, código, reportes, errores o decisiones más complejas, ahí sí uso DeepSeek Pro para pensar mejor.',
+      'explicacion',
+      ['Registrar gasto simple', 'Registrar ingreso simple', 'Analizar el mes']
+    );
+  }
+
+  return null;
 }
 
 function parseSimpleAmount(value: string): number {
@@ -48,18 +114,29 @@ function parseSimpleAmount(value: string): number {
   return Math.round(base);
 }
 
+function hasAnyPhrase(text: string, phrases: string[]): boolean {
+  return phrases.some((phrase) => new RegExp(`(^|\\W)${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\W|$)`, 'i').test(text));
+}
+
 function inferSimpleType(message: string): FastTransactionType | null {
   const text = normalizePlainText(message);
-  const expenseWords = [
-    'gaste', 'me gaste', 'gasto', 'compre', 'pague', 'pagar', 'pago', 'me toco pagar', 'almorce',
-    'cene', 'desayune', 'recargue', 'tanquie', 'saque para', 'inverti en', 'acabe de pagar', 'acabo de pagar',
+
+  const incomePhrases = [
+    'me pagaron', 'me pago', 'me ingreso', 'me ingresaron', 'me consignaron', 'me depositaron', 'me transfirieron',
+    'me enviaron', 'me dieron', 'me llego', 'me entro', 'me entraron', 'recibi', 'cobre', 'cobro', 'vendi', 'venta',
+    'sueldo', 'salario', 'quincena', 'honorarios', 'ingrese', 'ingresa', 'ingreso', 'entraron', 'consignaron',
+    'depositaron', 'transferencia recibida', 'recibi pago', 'pago recibido',
   ];
-  const incomeWords = [
-    'ingrese', 'ingresa', 'ingreso', 'me entro', 'entro', 'entraron', 'recibi', 'me pagaron', 'cobre',
-    'cobro', 'consignaron', 'depositaron', 'vendi', 'venta', 'sueldo', 'salario', 'quincena', 'me llego',
+
+  const expensePhrases = [
+    'gaste', 'me gaste', 'gasto', 'pague', 'pagar', 'pago', 'compre', 'compra', 'me compre', 'compramos',
+    'pedi', 'pague por', 'pague en', 'acabe de pagar', 'acabo de pagar', 'me toco pagar', 'almorce', 'cene',
+    'desayune', 'recargue', 'tanquie', 'saque para', 'inverti en', 'compre una', 'compre un', 'compre el',
   ];
-  if (expenseWords.some((word) => text.includes(word))) return 'expense';
-  if (incomeWords.some((word) => text.includes(word))) return 'income';
+
+  // Income wins first for phrases like "Juan me pago 50 mil".
+  if (hasAnyPhrase(text, incomePhrases)) return 'income';
+  if (hasAnyPhrase(text, expensePhrases)) return 'expense';
   return null;
 }
 
@@ -68,8 +145,9 @@ function isComplexOrDangerous(message: string): boolean {
   const blocked = [
     'borra', 'borrar', 'elimina', 'eliminar', 'quita', 'quitar', 'corrige', 'corregir', 'cambia', 'modifica',
     'actualiza', 'duplicado', 'duplicados', 'limpia', 'limpiar', 'deuda', 'debo', 'me debe', 'prestamo', 'preste',
-    'abona', 'abono', 'pago deuda', 'analiza', 'como voy', 'reporte', 'plan', 'codigo', 'html', 'css', 'react',
-    'javascript', 'typescript', 'prompt', 'explica', 'por que', 'porque', 'imagen', 'foto', 'excel',
+    'abona', 'abono', 'pago deuda', 'analiza', 'analizar', 'como voy', 'reporte', 'plan', 'presupuesto', 'codigo',
+    'html', 'css', 'react', 'javascript', 'typescript', 'prompt', 'explica', 'explicame', 'por que', 'porque',
+    'imagen', 'foto', 'excel', 'importa', 'importar', 'resumen', 'diagnostico', 'consejo', 'recomienda',
   ];
   return blocked.some((word) => text.includes(word));
 }
@@ -77,18 +155,19 @@ function isComplexOrDangerous(message: string): boolean {
 function inferSimpleCategory(message: string, type: FastTransactionType): string {
   if (type === 'income') return 'Ingreso';
   const text = normalizePlainText(message);
-  if (['hamburguesa', 'papita', 'papas', 'helado', 'comida', 'mercado', 'cafe', 'almuerzo', 'restaurante', 'tienda', 'pan', 'gaseosa'].some((word) => text.includes(word))) return 'Alimentación';
-  if (['bus', 'taxi', 'uber', 'gasolina', 'transporte', 'pasaje', 'moto', 'carro'].some((word) => text.includes(word))) return 'Transporte';
-  if (['arriendo', 'luz', 'agua', 'gas', 'internet', 'hogar', 'servicio'].some((word) => text.includes(word))) return 'Hogar';
-  if (['medicina', 'farmacia', 'salud', 'doctor', 'cita medica'].some((word) => text.includes(word))) return 'Salud';
+  if (['hamburguesa', 'papita', 'papas', 'helado', 'comida', 'mercado', 'cafe', 'almuerzo', 'restaurante', 'tienda', 'pan', 'gaseosa', 'perro caliente', 'arepa', 'empanada', 'pizza'].some((word) => text.includes(word))) return 'Alimentación';
+  if (['bus', 'taxi', 'uber', 'gasolina', 'transporte', 'pasaje', 'moto', 'carro', 'parqueadero', 'peaje'].some((word) => text.includes(word))) return 'Transporte';
+  if (['arriendo', 'luz', 'agua', 'gas', 'internet', 'hogar', 'servicio', 'aseo'].some((word) => text.includes(word))) return 'Hogar';
+  if (['medicina', 'farmacia', 'salud', 'doctor', 'cita medica', 'odontologia'].some((word) => text.includes(word))) return 'Salud';
   if (['ropa', 'zapatos', 'camisa', 'pantalon'].some((word) => text.includes(word))) return 'Ropa';
+  if (['cine', 'netflix', 'spotify', 'juego', 'salida', 'rumba'].some((word) => text.includes(word))) return 'Entretenimiento';
   return 'Otros';
 }
 
 function inferSimpleDescription(message: string, type: FastTransactionType): string {
   const description = String(message || '')
     .replace(/\$?\s*\d+(?:[.,]\d+)?\s*(mil|lucas?|k|millones?|millon)?/gi, '')
-    .replace(/\b(me gaste|gast[eé]|gasto|compre|compr[eé]|pague|pagu[eé]|pago|pagar|acabe de pagar|acabo de pagar|ingresa|ingrese|ingreso|me entro|entro|entraron|recibi|recib[ií]|me pagaron|cobre|cobr[eé]|vendi|venta|por|en|de|con|una|un|la|el)\b/gi, ' ')
+    .replace(/\b(me gaste|gast[eé]|gasto|compre|compr[eé]|compra|pedi|ped[ií]|pague|pagu[eé]|pago|pagar|acabe de pagar|acabo de pagar|me toco pagar|ingresa|ingrese|ingreso|me entro|entro|entraron|recibi|recib[ií]|me pagaron|me pago|cobre|cobr[eé]|vendi|venta|por|en|de|con|una|un|la|el|los|las)\b/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   if (description) return description.charAt(0).toUpperCase() + description.slice(1);
@@ -110,7 +189,7 @@ function inferSimpleAccount(message: string, context: unknown): string {
   return 'Efectivo';
 }
 
-function buildFastTransactionAction(message: string, context: unknown) {
+function buildFastTransactionAction(message: string, context: unknown): LocalAction | null {
   if (isComplexOrDangerous(message)) return null;
   const amount = parseSimpleAmount(message);
   const type = inferSimpleType(message);
@@ -124,7 +203,7 @@ function buildFastTransactionAction(message: string, context: unknown) {
   return {
     intent: 'create_transaction',
     replyToUser: `Listo, registré ${type === 'income' ? 'un' : 'el'} ${verb} de $${amount.toLocaleString('es-CO')} en ${accountName}${description ? ` (${description})` : ''}.`,
-    confidence: 0.98,
+    confidence: 0.99,
     assistantMode: 'registro',
     riskLevel: 'low',
     emotionalTone: 'encouraging',
@@ -210,6 +289,11 @@ export default async function handler(req: any, res: any) {
   if (message.length > 4000) return res.status(413).json({ error: 'El mensaje es demasiado largo.' });
 
   const hasImage = Boolean(imageBase64 && imageMimeType);
+  const localConversationAction = buildCheapLocalConversation(message, hasImage);
+  if (localConversationAction && !excelImportContext) {
+    return res.status(200).json({ action: localConversationAction, model: 'local-router' });
+  }
+
   const fastAction = !hasImage && !excelImportContext ? buildFastTransactionAction(message, context) : null;
   if (fastAction) {
     return res.status(200).json({ action: fastAction, model: 'local-fast-transaction' });
@@ -232,6 +316,9 @@ Funcionas con DeepSeek V4 Pro desde Vercel con razonamiento alto. Tu objetivo NO
 USUARIO AUTENTICADO
 uid: ${verifiedUser.uid}
 email: ${verifiedUser.email || 'sin email'}
+
+OPTIMIZACION DE COSTOS
+La app ya resolvio localmente saludos, ayuda simple, imagenes no soportadas y movimientos simples. Si esta solicitud llego a DeepSeek, probablemente requiere razonamiento real. No conviertas tareas complejas en acciones peligrosas. No uses tokens de mas: responde claro, util y sin vueltas.
 
 IDENTIDAD Y PERSONALIDAD
 Eres un copiloto financiero, tecnico y creativo: humano, colombiano, claro, inteligente y cercano.
@@ -286,7 +373,7 @@ Cuando la intencion sea borrar, corregir, registrar abonos o cerrar deudas, desc
 "deshacer" debe tratarse como conversation_only o clarify; la app restaurara el ultimo borrado, no pidas borrar.
 
 REGLA DE RAPIDEZ
-Si el mensaje es un gasto o ingreso simple con valor claro, responde con intent create_transaction, confidence 0.95 o mayor, sin pedir confirmacion. Ejemplos: "gaste 1000 en papitas", "pague 16000 por hamburguesa", "me entro 50000". Solo pide confirmacion para borrar, corregir, deudas, datos ambiguos o acciones masivas.
+Si por alguna razon llega aqui un gasto o ingreso simple con valor claro, responde con intent create_transaction, confidence 0.95 o mayor, sin pedir confirmacion. Solo pide confirmacion para borrar, corregir, deudas, datos ambiguos o acciones masivas.
 
 REGLA PARA CODIGO Y RESPUESTAS CREATIVAS
 Si el usuario pide codigo, interfaz, HTML, React, CSS, explicacion bonita, plantilla o informe:
@@ -355,19 +442,17 @@ REGLAS DE RESPUESTA HUMANA
 - Si das codigo, explica brevemente donde pegarlo y que hace.
 
 MEMORIA ACTUAL DEL USUARIO
-${String(aiMemory || 'Sin memoria guardada todavia').slice(0, 5000)}
+${String(aiMemory || 'Sin memoria guardada todavia').slice(0, 3500)}
 
 DIAGNOSTICO FINANCIERO PRECALCULADO
-${String(diagnosticContext || 'Sin diagnostico precalculado').slice(0, 6500)}
+${String(diagnosticContext || 'Sin diagnostico precalculado').slice(0, 4500)}
 
 CONTEXTO FINANCIERO REAL DE LA APP
-${String(context || 'Sin contexto disponible').slice(0, 14000)}
+${String(context || 'Sin contexto disponible').slice(0, 9000)}
 ${excelContextBlock}
 ${imageContextBlock}
 `;
 
-  // DeepSeek V4 Pro text endpoint rejects OpenAI-style image_url content.
-  // Keep the payload text-only so the assistant never crashes when the UI has an image selected.
   const finalUserMessage = {
     role: 'user',
     content: hasImage
@@ -381,8 +466,8 @@ ${imageContextBlock}
     response_format: { type: 'json_object' },
     thinking: { type: 'enabled' },
     reasoning_effort: 'high',
-    temperature: 0.82,
-    max_tokens: 8192,
+    temperature: 0.72,
+    max_tokens: 4096,
   };
 
   try {
