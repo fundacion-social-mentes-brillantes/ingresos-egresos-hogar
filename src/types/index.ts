@@ -8,6 +8,8 @@ export type QueryMetric = 'expenses' | 'income' | 'balance' | 'by_category' | 'b
 export type DebtDirection = 'receivable' | 'payable';
 export type DebtStatus = 'open' | 'partial' | 'paid';
 export type DebtSource = 'bot' | 'manual';
+export type AiRiskLevel = 'low' | 'medium' | 'high';
+export type AiAssistantMode = 'registro' | 'analisis' | 'coach' | 'emocional' | 'estrategia' | 'explicacion' | 'conversacion';
 export type BotIntent =
   | 'create_transaction'
   | 'query_summary'
@@ -86,6 +88,23 @@ export interface Debt {
   closedAt?: Date | null;
 }
 
+export interface AiInsight {
+  title: string;
+  detail: string;
+  severity?: AiRiskLevel;
+}
+
+export interface AiMemoryProfile {
+  preferredName?: string;
+  tonePreference?: string;
+  financialGoals?: string[];
+  sensitiveCategories?: string[];
+  knownIncomePattern?: string;
+  spendingPatterns?: string[];
+  coachingNotes?: string[];
+  lastUpdatedAt?: Date;
+}
+
 export interface ChatMessage {
   id: string;
   text: string;
@@ -98,6 +117,10 @@ export interface ChatMessage {
   debtId?: string;
   summary?: FinancialSummary;
   imageUrl?: string;
+  assistantMode?: AiAssistantMode;
+  riskLevel?: AiRiskLevel;
+  insights?: AiInsight[];
+  suggestedActions?: string[];
 }
 
 export interface ActionLog {
@@ -165,6 +188,11 @@ export interface BotAction {
   confidence: number;
   emotionalTone?: 'calm' | 'encouraging' | 'alert' | 'neutral';
   suggestedNextQuestion?: string;
+  assistantMode?: AiAssistantMode;
+  riskLevel?: AiRiskLevel;
+  insights?: AiInsight[];
+  suggestedActions?: string[];
+  memoryPatch?: Partial<AiMemoryProfile>;
 }
 
 // ── Firebase callable response ─────────────────────────────────────────────
