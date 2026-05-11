@@ -2,6 +2,7 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { useUserProfile } from '../../hooks/useUserProfile';
 import { ProfileAvatar } from '../visual/ProfileAvatar';
+import { VisualModeToggle } from '../ui/VisualModeToggle';
 import {
   LayoutDashboard,
   MessageSquare,
@@ -57,6 +58,7 @@ export function Sidebar() {
             Control familiar premium
           </div>
         </div>
+        <VisualModeToggle className="mt-3" />
       </div>
 
       <nav className="custom-scrollbar flex-1 space-y-1 overflow-y-auto px-4 pb-4">

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import clsx from 'clsx';
+import { VisualModeToggle } from '../ui/VisualModeToggle';
 import {
   LayoutDashboard,
   MessageSquare,
@@ -48,6 +49,7 @@ export function MobileNav() {
               <X className="h-4 w-4" />
             </button>
           </div>
+          <VisualModeToggle compact className="mb-3" />
           <div className="grid grid-cols-2 gap-2">
             {moreItems.map(({ to, label, icon: Icon }) => (
               <NavLink

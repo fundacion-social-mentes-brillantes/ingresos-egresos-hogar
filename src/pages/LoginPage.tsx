@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
+import { VisualModeToggle } from '../components/ui/VisualModeToggle';
 import { Mail, Lock, User, TrendingUp, AlertCircle } from 'lucide-react';
 
 function getAuthErrorMessage(err: unknown, mode: 'login' | 'register' | 'google'): string {
@@ -119,9 +120,11 @@ export function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center px-4"
-      style={{ background: 'radial-gradient(ellipse at 20% 50%, rgba(37,99,235,0.15) 0%, transparent 60%), radial-gradient(ellipse at 80% 20%, rgba(99,102,241,0.1) 0%, transparent 50%), #0f172a' }}
-    >
+    <div className="auth-shell min-h-screen flex flex-col items-center justify-center px-4">
+      <div className="mb-5 w-full max-w-md animate-fade-in">
+        <VisualModeToggle compact />
+      </div>
+
       {/* Logo */}
       <div className="mb-8 text-center animate-slide-up">
         <div className="w-16 h-16 rounded-2xl bg-blue-600 flex items-center justify-center mx-auto mb-4 shadow-xl shadow-blue-500/30 animate-pulse-glow">

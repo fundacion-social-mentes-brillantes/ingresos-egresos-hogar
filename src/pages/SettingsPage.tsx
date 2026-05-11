@@ -10,14 +10,13 @@ import { Input, Select } from '../components/ui/Input';
 import { AccountBrandMark } from '../components/visual/AccountBrandMark';
 import { EmptyState } from '../components/visual/EmptyState';
 import { ProfileAvatar } from '../components/visual/ProfileAvatar';
+import { VisualModeToggle } from '../components/ui/VisualModeToggle';
 import {
   User,
   Wallet,
   Tag,
   Plus,
-  Moon,
   ShieldCheck,
-  Sun,
   Camera,
   X,
   Loader2,
@@ -61,18 +60,11 @@ export function SettingsPage() {
   const { displayName, email, photo, initials } = useUserProfile();
   const { accounts, refresh } = useTransactions();
   const [loading, setLoading] = useState<string | null>(null);
-  const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
   const [showAdd, setShowAdd] = useState(false);
   const [newAcc, setNewAcc] = useState({ name: '', type: 'cash' as AccountType, balance: 0 });
   const [photoSaving, setPhotoSaving] = useState(false);
   const [photoMessage, setPhotoMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const handleThemeChange = (value: 'dark' | 'light') => {
-    localStorage.setItem('theme', value);
-    setTheme(value);
-    document.body.classList.toggle('theme-light', value === 'light');
-  };
 
   const handleAddAccount = async () => {
     if (!user || !newAcc.name) return;
@@ -175,25 +167,8 @@ export function SettingsPage() {
             <ShieldCheck className="h-5 w-5 text-blue-300" />
             <h2 className="font-black">Tema visual</h2>
           </div>
-          <p className="text-sm leading-relaxed text-slate-500">Oscuro tipo black sapphire o claro pearl/champagne, ambos con tokens propios.</p>
-          <div className="mt-5 grid grid-cols-2 gap-3">
-            <button
-              onClick={() => handleThemeChange('dark')}
-              className={`rounded-3xl border p-4 text-left transition ${theme === 'dark' ? 'border-blue-400/35 bg-blue-500/15 shadow-lg shadow-blue-500/10' : 'border-slate-700/40 bg-slate-900/35'}`}
-            >
-              <Moon className="h-5 w-5 text-blue-300" />
-              <p className="mt-3 font-black text-slate-100">Oscuro</p>
-              <p className="text-xs text-slate-500">Navy profundo</p>
-            </button>
-            <button
-              onClick={() => handleThemeChange('light')}
-              className={`rounded-3xl border p-4 text-left transition ${theme === 'light' ? 'border-amber-400/35 bg-amber-500/15 shadow-lg shadow-amber-500/10' : 'border-slate-700/40 bg-slate-900/35'}`}
-            >
-              <Sun className="h-5 w-5 text-amber-300" />
-              <p className="mt-3 font-black text-slate-100">Claro</p>
-              <p className="text-xs text-slate-500">Pearl/champagne</p>
-            </button>
-          </div>
+          <p className="text-sm leading-relaxed text-slate-500">Modo Hombre conserva el look actual. Modo Mujer activa una experiencia lilipink rosada, lila y suave sin guardar nada en Firebase.</p>
+          <VisualModeToggle className="mt-5" />
         </Card>
       </section>
 

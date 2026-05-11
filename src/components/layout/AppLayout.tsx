@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { MobileNav } from './MobileNav';
+import { VISUAL_MODE_EVENT, applyVisualMode, getStoredVisualMode } from '../../lib/visualMode';
 
 interface AppLayoutProps {
   children: React.ReactNode;
@@ -12,12 +13,18 @@ export function AppLayout({ children }: AppLayoutProps) {
   const mainRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
-    const applyTheme = () => {
-      document.body.classList.toggle('theme-light', localStorage.getItem('theme') === 'light');
+    const syncVisualMode = () => {
+      applyVisualMode(getStoredVisualMode());
     };
-    applyTheme();
-    window.addEventListener('storage', applyTheme);
-    return () => window.removeEventListener('storage', applyTheme);
+
+    syncVisualMode();
+    window.addEventListener('storage', syncVisualMode);
+    window.addEventListener(VISUAL_MODE_EVENT, syncVisualMode);
+
+    return () => {
+      window.removeEventListener('storage', syncVisualMode);
+      window.removeEventListener(VISUAL_MODE_EVENT, syncVisualMode);
+    };
   }, []);
 
   useEffect(() => {
