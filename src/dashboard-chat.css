@@ -2,7 +2,48 @@
    This file only adjusts visual density when ChatPagePro is rendered inside the dashboard card.
    It does not change chat logic, AI calls, Firestore, or financial behavior. */
 
+.dashboard-chat-column {
+  min-height: 0;
+}
+
+.dashboard-chat-panel {
+  flex: 0 0 auto;
+  height: clamp(380px, 55vh, 520px);
+  min-height: 360px;
+  max-height: 55vh;
+  overflow: hidden;
+}
+
+.dashboard-chat-panel > .flex.flex-col.h-full.min-h-0 {
+  height: 100%;
+  min-height: 0;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.dashboard-chat-panel > .flex.flex-col.h-full.min-h-0 > header,
+.dashboard-chat-panel > .flex.flex-col.h-full.min-h-0 > footer {
+  flex-shrink: 0;
+}
+
+.dashboard-chat-panel > .flex.flex-col.h-full.min-h-0 > .custom-scrollbar {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 @media (min-width: 1024px) {
+  .dashboard-chat-column {
+    min-height: 780px;
+  }
+
+  .dashboard-chat-panel {
+    flex: 1 1 0;
+    height: auto;
+    min-height: 620px;
+    max-height: none;
+  }
+
   .premium-panel:has(> .flex.flex-col.h-full.min-h-0) {
     min-height: 620px;
   }
@@ -26,14 +67,24 @@
 }
 
 @media (min-width: 1280px) {
+  .dashboard-chat-panel {
+    min-height: 680px;
+  }
+
   .premium-panel:has(> .flex.flex-col.h-full.min-h-0) {
     min-height: 680px;
   }
 }
 
 @media (max-width: 1023px) {
+  .dashboard-chat-panel.premium-panel:has(> .flex.flex-col.h-full.min-h-0) {
+    height: clamp(380px, 55vh, 520px);
+    min-height: 360px;
+    max-height: 55vh;
+  }
+
   .premium-panel:has(> .flex.flex-col.h-full.min-h-0) {
-    min-height: 680px;
+    min-height: 0;
   }
 }
 

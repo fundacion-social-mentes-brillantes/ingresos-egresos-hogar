@@ -38,7 +38,7 @@ export function DashboardPage() {
 
   return (
     <div className="grid min-h-[calc(100dvh-2rem)] grid-cols-1 gap-5 pb-6 lg:grid-cols-12 lg:items-start">
-      <div className="flex min-h-[780px] flex-col lg:col-span-8 lg:h-[calc(100dvh-3rem)] xl:col-span-8">
+      <div className="dashboard-chat-column flex flex-col lg:col-span-8 lg:h-[calc(100dvh-3rem)] xl:col-span-8">
         <section className="lux-hero relative mb-3 shrink-0 p-4 sm:p-5">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
@@ -53,7 +53,7 @@ export function DashboardPage() {
           </div>
         </section>
 
-        <div className="premium-panel flex min-h-[620px] flex-1 flex-col overflow-hidden rounded-[1.75rem] border border-slate-700/40">
+        <div className="dashboard-chat-panel premium-panel flex flex-col overflow-hidden rounded-[1.75rem] border border-slate-700/40">
           <ChatPage embedded />
         </div>
       </div>
