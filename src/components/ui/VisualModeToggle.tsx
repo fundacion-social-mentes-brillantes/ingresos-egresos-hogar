@@ -14,8 +14,8 @@ const options: Array<{
   detail: string;
   icon: typeof Mars;
 }> = [
-  { value: 'man', label: 'Modo Hombre', detail: 'Actual', icon: Mars },
-  { value: 'woman', label: 'Modo Mujer', detail: 'Lilipink', icon: Venus },
+  { value: 'man', label: 'Hombre', detail: 'Actual', icon: Mars },
+  { value: 'woman', label: 'Mujer', detail: 'Lilipink', icon: Venus },
 ];
 
 export function VisualModeToggle({ className, compact }: VisualModeToggleProps) {

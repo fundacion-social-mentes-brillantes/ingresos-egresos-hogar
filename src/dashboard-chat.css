@@ -36,3 +36,21 @@
     min-height: 680px;
   }
 }
+
+body.theme-woman .premium-panel:has(> .flex.flex-col.h-full.min-h-0) {
+  background:
+    radial-gradient(circle at 12% 0%, rgba(251, 207, 232, 0.46), transparent 34%),
+    radial-gradient(circle at 92% 10%, rgba(216, 180, 254, 0.34), transparent 32%),
+    linear-gradient(180deg, rgba(255, 245, 250, 0.88), rgba(252, 231, 243, 0.62) 52%, rgba(243, 232, 255, 0.54)) !important;
+}
+
+body.theme-woman .premium-panel:has(> .flex.flex-col.h-full.min-h-0)::before {
+  opacity: 0.16;
+}
+
+body.theme-woman .premium-panel:has(> .flex.flex-col.h-full.min-h-0) > .flex.flex-col.h-full.min-h-0 {
+  background:
+    radial-gradient(circle at 18% 10%, rgba(251, 207, 232, 0.36), transparent 34%),
+    radial-gradient(circle at 88% 16%, rgba(216, 180, 254, 0.28), transparent 32%),
+    linear-gradient(180deg, rgba(255, 247, 252, 0.58), rgba(252, 231, 243, 0.34)) !important;
+}
