@@ -15,6 +15,7 @@ import {
   BarChart3,
   ShieldCheck,
   Sparkles,
+  WalletCards,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -23,6 +24,7 @@ const navItems = [
   { to: '/chat',          label: 'Copiloto',       icon: MessageSquare    },
   { to: '/transactions',  label: 'Movimientos',    icon: ArrowLeftRight   },
   { to: '/debts',         label: 'Deudas',         icon: HandCoins        },
+  { to: '/accounts',      label: 'Cuentas',        icon: WalletCards      },
   { to: '/import',        label: 'Importar',       icon: FileSpreadsheet  },
   { to: '/reports',       label: 'Reportes',       icon: BarChart3        },
   { to: '/backup',        label: 'Respaldo',       icon: ShieldCheck      },

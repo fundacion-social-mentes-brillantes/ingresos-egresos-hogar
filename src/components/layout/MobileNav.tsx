@@ -13,6 +13,7 @@ import {
   Settings,
   MoreHorizontal,
   X,
+  WalletCards,
 } from 'lucide-react';
 
 const primaryItems = [
@@ -23,6 +24,7 @@ const primaryItems = [
 ];
 
 const moreItems = [
+  { to: '/accounts', label: 'Cuentas', icon: WalletCards },
   { to: '/import', label: 'Importar', icon: FileSpreadsheet },
   { to: '/reports', label: 'Reportes', icon: BarChart3 },
   { to: '/backup', label: 'Respaldo', icon: ShieldCheck },

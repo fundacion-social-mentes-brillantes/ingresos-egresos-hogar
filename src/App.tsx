@@ -5,6 +5,7 @@ import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ChatPage } from './pages/ChatPagePro';
 import { TransactionsPage } from './pages/TransactionsPage';
+import { AccountsPage } from './pages/AccountsPage';
 import { ImportPage } from './pages/ImportPage';
 import { DebtsPage } from './pages/DebtsPage';
 import { ReportsPage } from './pages/ReportsPage';
@@ -52,6 +53,12 @@ function AppRoutes() {
       <Route path="/transactions" element={
         <ProtectedRoute>
           <TransactionsPage />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/accounts" element={
+        <ProtectedRoute>
+          <AccountsPage />
         </ProtectedRoute>
       } />
 
