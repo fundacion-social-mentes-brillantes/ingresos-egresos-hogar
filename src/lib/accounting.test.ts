@@ -4,11 +4,11 @@ import {
   buildAccountingLedger,
   buildFinancialSummaryForPeriod,
   calculateReconciliation,
+  genericReversalBlockReason,
   inferMovementKind,
   isReportableFinancialTransaction,
   parseCurrencyInput,
 } from './accounting';
-import { genericReversalBlockReason } from './accountingOperations';
 import { buildFinanceWorkbook, buildMonthlyReport } from './reporting';
 import { exportTransactionsToExcel } from './exportExcel';
 
