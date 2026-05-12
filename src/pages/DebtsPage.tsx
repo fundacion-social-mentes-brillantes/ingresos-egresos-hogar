@@ -1,1 +1,1 @@
-export { DebtsPageWithAccounts as DebtsPage } from './DebtsPageWithAccounts';
+export { DebtsPage as default, DebtsPage } from './DebtsPageSecure';
