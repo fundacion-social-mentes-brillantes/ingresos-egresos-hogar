@@ -47,6 +47,7 @@ export interface Account {
   currentBalance: number;
   active: boolean;
   createdAt: Date;
+  batchImportId?: string;
 }
 
 export interface Transaction {
@@ -64,6 +65,9 @@ export interface Transaction {
   confidence: number;
   createdAt: Date;
   updatedAt: Date;
+  batchImportId?: string;
+  importRow?: number;
+  excludeFromReports?: boolean;
 }
 
 export interface DeletedTransaction extends Transaction {
@@ -145,7 +149,7 @@ export interface AppSettings {
   monthlyStartDay: number;
 }
 
-// ── Bot response shape ─────────────────────────────────────────────────────
+// ── Bot response shape ─────────────────────────────────────
 
 export interface BotTransactionPayload {
   type: TransactionType;
@@ -225,7 +229,7 @@ export interface FinancialSummary {
   generatedAt: Date;
 }
 
-// ── UI helpers ─────────────────────────────────────────────────────────────
+// ── UI helpers ─────────────────────────────────────────────
 
 export const CATEGORIES = [
   'Alimentación',
