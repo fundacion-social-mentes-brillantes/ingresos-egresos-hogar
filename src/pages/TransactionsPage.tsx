@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { ArrowDownLeft, ArrowUpRight, Download, Loader2, Pencil, Plus, ReceiptText, Search, Trash2 } from 'lucide-react';
@@ -316,6 +316,6 @@ function Metric({ title, value, tone }: { title: string; value: number; tone: 'g
   return <div className={clsx('rounded-3xl border p-4', toneClass)}><p className="text-[10px] font-black uppercase tracking-[0.16em]">{title}</p><p className="mt-1 text-lg font-black text-slate-100">{formatCOP(value)}</p></div>;
 }
 
-function Badge({ children }: { children: React.ReactNode }) {
+function Badge({ children }: { children: ReactNode }) {
   return <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-600/30 bg-slate-800/50 px-3 py-1 text-[10px] font-bold text-slate-300">{children}</span>;
 }
