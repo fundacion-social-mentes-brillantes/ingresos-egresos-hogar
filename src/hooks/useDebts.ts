@@ -3,6 +3,7 @@ import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestor
 import { useAuth } from '../contexts/AuthContext';
 import { db } from '../lib/firebase';
 import type { Debt } from '../types';
+import { summarizeDebts, toMoney } from '../lib/accounting';
 
 function toDate(value: unknown): Date {
   if (value instanceof Date) return value;
@@ -19,13 +20,16 @@ function toOptionalDate(value: unknown): Date | null {
 }
 
 function normalizeDebt(id: string, data: Record<string, any>): Debt {
-  const amountOriginal = Number(data.amountOriginal || 0);
-  const amountPaid = Number(data.amountPaid || 0);
+  const amountOriginal = toMoney(data.amountOriginal);
+  const amountPaid = toMoney(data.amountPaid);
+  const status = data.status || (amountPaid >= amountOriginal ? 'paid' : amountPaid > 0 ? 'partial' : 'open');
+
   return {
     id,
     ...data,
     amountOriginal,
     amountPaid,
+    status,
     dueDate: toOptionalDate(data.dueDate),
     closedAt: toOptionalDate(data.closedAt),
     createdAt: toDate(data.createdAt),
@@ -62,22 +66,7 @@ export function useDebts() {
     return () => unsubscribe();
   }, [user]);
 
-  const summary = useMemo(() => {
-    const open = debts.filter((debt) => debt.status !== 'paid');
-    const receivable = open
-      .filter((debt) => debt.direction === 'receivable')
-      .reduce((sum, debt) => sum + Math.max(0, debt.amountOriginal - debt.amountPaid), 0);
-    const payable = open
-      .filter((debt) => debt.direction === 'payable')
-      .reduce((sum, debt) => sum + Math.max(0, debt.amountOriginal - debt.amountPaid), 0);
-
-    return {
-      receivable,
-      payable,
-      net: receivable - payable,
-      openCount: open.length,
-    };
-  }, [debts]);
+  const summary = useMemo(() => summarizeDebts(debts), [debts]);
 
   return { debts, loading, summary };
 }
