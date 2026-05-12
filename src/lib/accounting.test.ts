@@ -8,7 +8,9 @@ import {
   isReportableFinancialTransaction,
   parseCurrencyInput,
 } from './accounting';
+import { genericReversalBlockReason } from './accountingOperations';
 import { buildFinanceWorkbook, buildMonthlyReport } from './reporting';
+import { exportTransactionsToExcel } from './exportExcel';
 
 function account(overrides: Partial<Account> = {}): Account {
   return {
@@ -78,6 +80,25 @@ describe('parseCurrencyInput', () => {
   });
 });
 
+describe('protected generic reversals', () => {
+  it('blocks transfers from generic reversal', () => {
+    expect(genericReversalBlockReason(tx({ transferId: 'tr1', transferDirection: 'out', movementKind: 'transfer_out' }))).toMatch(/reverseTransfer/i);
+  });
+
+  it('blocks debt movements from generic reversal', () => {
+    expect(genericReversalBlockReason(tx({ debtId: 'd1', debtMovementKind: 'loan_principal_out', movementKind: 'loan_given' }))).toMatch(/Deudas/i);
+  });
+
+  it('blocks already reversed and reversal transactions', () => {
+    expect(genericReversalBlockReason(tx({ isReversed: true }))).toMatch(/ya fue reversado/i);
+    expect(genericReversalBlockReason(tx({ reversalOf: 'old' }))).toMatch(/reverso no se reversa/i);
+  });
+
+  it('blocks imported historical movements from generic reversal', () => {
+    expect(genericReversalBlockReason(tx({ batchImportId: 'batch1', movementKind: 'historical_non_reportable', excludeFromReports: true }))).toMatch(/historico|importado/i);
+  });
+});
+
 describe('movement classification', () => {
   it('infers transfer, debt and historical kinds from legacy data', () => {
     expect(inferMovementKind(tx({ transferDirection: 'out', transferId: 't1' }))).toBe('transfer_out');
@@ -106,6 +127,7 @@ describe('ledger accounting', () => {
   it('shows a 5.000 reconciliation difference when real balance differs from calculated balance', () => {
     const result = calculateReconciliation(3_556_319, 3_551_319);
     expect(result.estado).toBe('descuadre');
+    expect(result.label).not.toBe('Cuadra');
     expect(result.diferencia).toBe(-5_000);
   });
 
@@ -253,5 +275,9 @@ describe('period reporting', () => {
     expect(cover?.getCell('B2').value).toBe(ledger.global.saldoFisicoCalculado);
     expect(cover?.getCell('B5').value).toBe(ledger.global.ingresosReportables);
     expect(cover?.getCell('B6').value).toBe(ledger.global.gastosReportablesOPresentes);
+  });
+
+  it('legacy Excel export is blocked without accounts so it cannot use old totals', async () => {
+    await expect(exportTransactionsToExcel([tx()], 'x.xlsx')).rejects.toThrow(/legacy bloqueada/i);
   });
 });
