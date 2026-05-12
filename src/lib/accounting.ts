@@ -1,4 +1,4 @@
-import type { Account, Debt, FinancialSummary, QueryRange, Transaction } from '../types';
+import type { Account, Debt, FinancialSummary, MovementKind, QueryRange, Transaction } from '../types';
 
 export type DebtMovementKind =
   | 'loan_principal_out'
@@ -19,6 +19,7 @@ export interface AccountAccountingSummary {
   saldoInicial: number;
   saldoFisicoCalculado: number;
   saldoRealIngresado: number;
+  saldoRealConfirmado: boolean;
   diferenciaConciliacion: number;
   ingresosFisicos: number;
   ingresosReportables: number;
@@ -34,7 +35,12 @@ export interface AccountAccountingSummary {
   prestamosRecibidos: number;
   abonosADeudasPorCobrar: number;
   abonosADeudasPorPagar: number;
+  gastosPendientesCreados: number;
+  gastosPendientesPagados: number;
   pagosInteresOMora: number;
+  ajustesConciliacion: number;
+  movimientosProtegidos: number;
+  movimientosLegacy: number;
   txCount: number;
   estado: 'cuadra' | 'descuadre';
 }
@@ -70,7 +76,7 @@ export interface ReconciliationResult {
   label: string;
 }
 
-function normalizeText(value: unknown): string {
+export function normalizeText(value: unknown): string {
   return String(value || '')
     .toLowerCase()
     .normalize('NFD')
@@ -96,11 +102,6 @@ function hasValidThousandsGroups(value: string, separator: '.' | ','): boolean {
   return parts.slice(1).every((part) => /^\d{3}$/.test(part));
 }
 
-/**
- * Parses Colombian peso inputs as integer COP values.
- * Valid: "45000", "45.000", "$45.000", "599.000", "2.912.319", "2,912,319".
- * Invalid ambiguous decimals are rejected instead of guessed.
- */
 export function parseCurrencyInput(input: unknown): number {
   if (typeof input === 'number') {
     return assertValidInteger(Math.round(input), input);
@@ -130,11 +131,7 @@ export function parseCurrencyInput(input: unknown): number {
 
   if (dotCount > 0 && commaCount > 0) {
     const allGroups = cleaned.replace(/[.,]/g, '');
-    const dotGroupsValid = cleaned.includes('.') ? cleaned.split('.').every((part, index) => (index === 0 ? /^\d{1,3}$/.test(part.replace(/,/g, '')) : /^\d{3}(,\d{3})*$/.test(part))) : true;
-    const commaGroupsValid = cleaned.includes(',') ? hasValidThousandsGroups(cleaned, ',') : true;
-    if (/^\d+$/.test(allGroups) && (commaGroupsValid || dotGroupsValid)) {
-      return assertValidInteger(Number(allGroups), raw);
-    }
+    if (/^\d+$/.test(allGroups)) return assertValidInteger(Number(allGroups), raw);
     throw new Error(`Valor de dinero ambiguo: ${raw}`);
   }
 
@@ -163,36 +160,73 @@ export function moneyEffect(tx: Pick<Transaction, 'type' | 'amount'>): number {
   return tx.type === 'income' ? amount : -amount;
 }
 
+export function isReversedTransaction(tx: Partial<Transaction>): boolean {
+  return Boolean(tx.isReversed || tx.reversalOf);
+}
+
+export function isProtectedTransaction(tx: Partial<TransactionWithAccounting>): boolean {
+  return Boolean(tx.transferId || tx.debtId || tx.debtMovementKind || tx.batchImportId || tx.reversalOf || tx.isReversed);
+}
+
+export function inferMovementKind(tx: Partial<TransactionWithAccounting>): MovementKind {
+  if (tx.movementKind) return tx.movementKind;
+  const category = normalizeText(tx.category);
+  const debtKind = normalizeText(tx.debtMovementKind);
+
+  if (tx.reversalOf) return 'reconciliation_adjustment';
+  if (tx.transferDirection === 'out') return 'transfer_out';
+  if (tx.transferDirection === 'in') return 'transfer_in';
+  if (tx.transferId || category.includes('transferencia entre cuentas')) return tx.type === 'income' ? 'transfer_in' : 'transfer_out';
+  if (debtKind === 'loan_principal_out' || category.includes('prestamo entregado')) return 'loan_given';
+  if (debtKind === 'loan_principal_in' || category.includes('prestamo recibido')) return 'loan_received';
+  if (debtKind === 'debt_payment_in' || category.includes('pago deuda recibida')) return 'loan_payment_received';
+  if (debtKind === 'debt_payment_out' || category.includes('pago deuda pagada')) return 'debt_payment_made';
+  if (category.includes('gasto pendiente') || category.includes('compra fiada')) return 'payable_expense_created';
+  if (category.includes('pago gasto pendiente') || category.includes('pago compra fiada')) return 'payable_expense_paid';
+  if (tx.excludeFromReports) return 'historical_non_reportable';
+  if (!tx.type) return 'legacy';
+  return tx.type === 'income' ? 'income' : 'expense';
+}
+
 export function isTransferTransaction(tx: Partial<TransactionWithAccounting>): boolean {
-  return Boolean(
-    tx.transferId ||
-    tx.transferDirection ||
-    normalizeText(tx.category).includes('transferencia entre cuentas')
-  );
+  const kind = inferMovementKind(tx);
+  return kind === 'transfer_in' || kind === 'transfer_out';
 }
 
 export function isDebtMovementTransaction(tx: Partial<TransactionWithAccounting>): boolean {
-  const kind = normalizeText(tx.debtMovementKind);
-  const category = normalizeText(tx.category);
-  return Boolean(
-    tx.debtId ||
-    kind ||
-    category.includes('prestamo entregado') ||
-    category.includes('prestamo recibido') ||
-    category.includes('pago deuda recibida') ||
-    category.includes('pago deuda pagada')
-  );
+  const kind = inferMovementKind(tx);
+  return [
+    'loan_given',
+    'loan_received',
+    'loan_payment_received',
+    'debt_payment_made',
+    'payable_expense_created',
+    'payable_expense_paid',
+    'receivable_created',
+  ].includes(kind);
+}
+
+export function affectsReport(tx: Partial<TransactionWithAccounting>): boolean {
+  if (isReversedTransaction(tx)) return false;
+  const kind = inferMovementKind(tx);
+  return kind === 'income' || kind === 'expense' || kind === 'payable_expense_created';
+}
+
+export function affectsCash(tx: Partial<TransactionWithAccounting>): boolean {
+  if (isReversedTransaction(tx)) return false;
+  const kind = inferMovementKind(tx);
+  return !['payable_expense_created', 'receivable_created', 'opening_balance'].includes(kind);
 }
 
 export function isReportableFinancialTransaction(tx: Partial<TransactionWithAccounting>): boolean {
-  return !tx.excludeFromReports && !isTransferTransaction(tx) && !isDebtMovementTransaction(tx);
+  return affectsReport(tx) && !tx.excludeFromReports;
 }
 
 export function calculateReconciliation(saldoCalculado: number, saldoRealIngresado: number): ReconciliationResult {
   const calculated = toMoney(saldoCalculado);
   const real = toMoney(saldoRealIngresado);
   const diferencia = real - calculated;
-  const estado = Math.abs(diferencia) <= 1 ? 'cuadra' : 'descuadre';
+  const estado = diferencia === 0 ? 'cuadra' : 'descuadre';
   return {
     saldoCalculado: calculated,
     saldoRealIngresado: real,
@@ -202,16 +236,27 @@ export function calculateReconciliation(saldoCalculado: number, saldoRealIngresa
   };
 }
 
+function getAccountRealBalance(account: Account): { amount: number; confirmed: boolean } {
+  if (account.realBalance !== undefined && account.realBalance !== null) {
+    return { amount: toMoney(account.realBalance), confirmed: true };
+  }
+  if (account.lastReconciledBalance !== undefined && account.lastReconciledBalance !== null) {
+    return { amount: toMoney(account.lastReconciledBalance), confirmed: true };
+  }
+  return { amount: toMoney(account.currentBalance), confirmed: false };
+}
+
 function emptyAccountSummary(account: Account): AccountAccountingSummary {
   const saldoInicial = toMoney(account.initialBalance);
-  const saldoRealIngresado = toMoney(account.currentBalance);
-  const reconciliation = calculateReconciliation(saldoInicial, saldoRealIngresado);
+  const real = getAccountRealBalance(account);
+  const reconciliation = calculateReconciliation(saldoInicial, real.amount);
   return {
     accountId: account.id,
     accountName: account.name,
     saldoInicial,
     saldoFisicoCalculado: saldoInicial,
-    saldoRealIngresado,
+    saldoRealIngresado: real.amount,
+    saldoRealConfirmado: real.confirmed,
     diferenciaConciliacion: reconciliation.diferencia,
     ingresosFisicos: 0,
     ingresosReportables: 0,
@@ -227,7 +272,12 @@ function emptyAccountSummary(account: Account): AccountAccountingSummary {
     prestamosRecibidos: 0,
     abonosADeudasPorCobrar: 0,
     abonosADeudasPorPagar: 0,
+    gastosPendientesCreados: 0,
+    gastosPendientesPagados: 0,
     pagosInteresOMora: 0,
+    ajustesConciliacion: 0,
+    movimientosProtegidos: 0,
+    movimientosLegacy: 0,
     txCount: 0,
     estado: reconciliation.estado,
   };
@@ -239,35 +289,39 @@ function transactionBelongsToAccount(tx: Transaction, account: Account): boolean
 
 function addTransactionToSummary(summary: AccountAccountingSummary, tx: TransactionWithAccounting) {
   const amount = toMoney(tx.amount);
+  const kind = inferMovementKind(tx);
   const isIncome = tx.type === 'income';
   const isExpense = tx.type === 'expense';
-  const isTransfer = isTransferTransaction(tx);
-  const isDebt = isDebtMovementTransaction(tx);
-  const isReportable = isReportableFinancialTransaction(tx);
-  const isHistorical = Boolean(tx.excludeFromReports) && !isTransfer && !isDebt;
-  const kind = String(tx.debtMovementKind || '');
 
   summary.txCount += 1;
-  if (isIncome) summary.ingresosFisicos += amount;
-  if (isExpense) {
-    summary.gastosFisicosTotales += amount;
-    summary.salidasFisicasTotales += amount;
+  if (isProtectedTransaction(tx)) summary.movimientosProtegidos += 1;
+  if (kind === 'legacy') summary.movimientosLegacy += 1;
+
+  if (affectsCash(tx)) {
+    if (isIncome) summary.ingresosFisicos += amount;
+    if (isExpense) {
+      summary.gastosFisicosTotales += amount;
+      summary.salidasFisicasTotales += amount;
+    }
   }
 
-  if (isReportable && isIncome) summary.ingresosReportables += amount;
-  if (isReportable && isExpense) summary.gastosReportablesOPresentes += amount;
+  if (isReportableFinancialTransaction(tx) && isIncome) summary.ingresosReportables += amount;
+  if (isReportableFinancialTransaction(tx) && isExpense) summary.gastosReportablesOPresentes += amount;
 
-  if (isHistorical && isIncome) summary.ingresosHistoricosNoReportables += amount;
-  if (isHistorical && isExpense) summary.gastosHistoricosNoReportables += amount;
-
-  if (isTransfer && tx.transferDirection === 'in' && isIncome) summary.transferenciasEntrantes += amount;
-  if (isTransfer && tx.transferDirection === 'out' && isExpense) summary.transferenciasSalientes += amount;
-
-  if (kind === 'loan_principal_out') summary.prestamosOtorgados += amount;
-  if (kind === 'loan_principal_in') summary.prestamosRecibidos += amount;
-  if (kind === 'debt_payment_in') summary.abonosADeudasPorCobrar += amount;
-  if (kind === 'debt_payment_out') summary.abonosADeudasPorPagar += amount;
-  if (kind === 'debt_interest_in' || kind === 'debt_interest_out') summary.pagosInteresOMora += amount;
+  if (kind === 'historical_non_reportable' && isIncome) summary.ingresosHistoricosNoReportables += amount;
+  if (kind === 'historical_non_reportable' && isExpense) summary.gastosHistoricosNoReportables += amount;
+  if (kind === 'transfer_in') summary.transferenciasEntrantes += amount;
+  if (kind === 'transfer_out') summary.transferenciasSalientes += amount;
+  if (kind === 'loan_given') summary.prestamosOtorgados += amount;
+  if (kind === 'loan_received') summary.prestamosRecibidos += amount;
+  if (kind === 'loan_payment_received') {
+    summary.abonosADeudasPorCobrar += amount;
+    summary.prestamosCobrados += amount;
+  }
+  if (kind === 'debt_payment_made') summary.abonosADeudasPorPagar += amount;
+  if (kind === 'payable_expense_created') summary.gastosPendientesCreados += amount;
+  if (kind === 'payable_expense_paid') summary.gastosPendientesPagados += amount;
+  if (kind === 'reconciliation_adjustment') summary.ajustesConciliacion += amount;
 }
 
 export function summarizeAccount(account: Account, transactions: Transaction[]): AccountAccountingSummary {
@@ -284,7 +338,7 @@ export function summarizeAccount(account: Account, transactions: Transaction[]):
 }
 
 export function summarizeDebts(debts: Debt[]): DebtAccountingSummary {
-  const open = debts.filter((debt) => debt.status !== 'paid');
+  const open = debts.filter((debt) => debt.status !== 'paid' && !debt.isReversed);
   const deudasPorCobrarPendientes = open
     .filter((debt) => debt.direction === 'receivable')
     .reduce((sum, debt) => sum + Math.max(0, toMoney(debt.amountOriginal) - toMoney(debt.amountPaid)), 0);
@@ -302,37 +356,12 @@ export function summarizeDebts(debts: Debt[]): DebtAccountingSummary {
   };
 }
 
-export function buildAccountingLedger(accounts: Account[], transactions: Transaction[], debts: Debt[] = []): AccountingLedger {
-  const activeAccounts = accounts.filter((account) => account.active !== false);
-  const byAccount = Object.fromEntries(accounts.map((account) => [account.id, summarizeAccount(account, transactions)]));
-  const summaries = Object.values(byAccount);
-  const debtSummary = summarizeDebts(debts);
-
-  const base = summaries.reduce((acc, item) => {
-    acc.saldoInicial += item.saldoInicial;
-    acc.saldoFisicoCalculado += item.saldoFisicoCalculado;
-    acc.saldoRealIngresado += item.saldoRealIngresado;
-    acc.ingresosFisicos += item.ingresosFisicos;
-    acc.ingresosReportables += item.ingresosReportables;
-    acc.ingresosHistoricosNoReportables += item.ingresosHistoricosNoReportables;
-    acc.gastosFisicosTotales += item.gastosFisicosTotales;
-    acc.salidasFisicasTotales += item.salidasFisicasTotales;
-    acc.gastosReportablesOPresentes += item.gastosReportablesOPresentes;
-    acc.gastosHistoricosNoReportables += item.gastosHistoricosNoReportables;
-    acc.transferenciasEntrantes += item.transferenciasEntrantes;
-    acc.transferenciasSalientes += item.transferenciasSalientes;
-    acc.prestamosOtorgados += item.prestamosOtorgados;
-    acc.prestamosCobrados += item.prestamosCobrados;
-    acc.prestamosRecibidos += item.prestamosRecibidos;
-    acc.abonosADeudasPorCobrar += item.abonosADeudasPorCobrar;
-    acc.abonosADeudasPorPagar += item.abonosADeudasPorPagar;
-    acc.pagosInteresOMora += item.pagosInteresOMora;
-    acc.txCount += item.txCount;
-    return acc;
-  }, {
+function emptyGlobalBase(): Omit<AccountAccountingSummary, 'accountId' | 'accountName'> {
+  return {
     saldoInicial: 0,
     saldoFisicoCalculado: 0,
     saldoRealIngresado: 0,
+    saldoRealConfirmado: true,
     diferenciaConciliacion: 0,
     ingresosFisicos: 0,
     ingresosReportables: 0,
@@ -348,13 +377,54 @@ export function buildAccountingLedger(accounts: Account[], transactions: Transac
     prestamosRecibidos: 0,
     abonosADeudasPorCobrar: 0,
     abonosADeudasPorPagar: 0,
+    gastosPendientesCreados: 0,
+    gastosPendientesPagados: 0,
     pagosInteresOMora: 0,
+    ajustesConciliacion: 0,
+    movimientosProtegidos: 0,
+    movimientosLegacy: 0,
     txCount: 0,
-    estado: 'cuadra' as const,
-  });
+    estado: 'cuadra',
+  };
+}
+
+export function buildAccountingLedger(accounts: Account[], transactions: Transaction[], debts: Debt[] = []): AccountingLedger {
+  const activeAccounts = accounts.filter((account) => account.active !== false);
+  const byAccount = Object.fromEntries(accounts.map((account) => [account.id, summarizeAccount(account, transactions)]));
+  const summaries = Object.values(byAccount);
+  const debtSummary = summarizeDebts(debts);
+
+  const base = summaries.reduce((acc, item) => {
+    acc.saldoInicial += item.saldoInicial;
+    acc.saldoFisicoCalculado += item.saldoFisicoCalculado;
+    acc.saldoRealIngresado += item.saldoRealIngresado;
+    acc.saldoRealConfirmado = acc.saldoRealConfirmado && item.saldoRealConfirmado;
+    acc.ingresosFisicos += item.ingresosFisicos;
+    acc.ingresosReportables += item.ingresosReportables;
+    acc.ingresosHistoricosNoReportables += item.ingresosHistoricosNoReportables;
+    acc.gastosFisicosTotales += item.gastosFisicosTotales;
+    acc.salidasFisicasTotales += item.salidasFisicasTotales;
+    acc.gastosReportablesOPresentes += item.gastosReportablesOPresentes;
+    acc.gastosHistoricosNoReportables += item.gastosHistoricosNoReportables;
+    acc.transferenciasEntrantes += item.transferenciasEntrantes;
+    acc.transferenciasSalientes += item.transferenciasSalientes;
+    acc.prestamosOtorgados += item.prestamosOtorgados;
+    acc.prestamosCobrados += item.prestamosCobrados;
+    acc.prestamosRecibidos += item.prestamosRecibidos;
+    acc.abonosADeudasPorCobrar += item.abonosADeudasPorCobrar;
+    acc.abonosADeudasPorPagar += item.abonosADeudasPorPagar;
+    acc.gastosPendientesCreados += item.gastosPendientesCreados;
+    acc.gastosPendientesPagados += item.gastosPendientesPagados;
+    acc.pagosInteresOMora += item.pagosInteresOMora;
+    acc.ajustesConciliacion += item.ajustesConciliacion;
+    acc.movimientosProtegidos += item.movimientosProtegidos;
+    acc.movimientosLegacy += item.movimientosLegacy;
+    acc.txCount += item.txCount;
+    return acc;
+  }, emptyGlobalBase());
 
   const reconciliation = calculateReconciliation(base.saldoFisicoCalculado, base.saldoRealIngresado);
-  const valorTotalLiquido = activeAccounts.reduce((sum, account) => sum + toMoney(account.currentBalance), 0);
+  const valorTotalLiquido = activeAccounts.reduce((sum, account) => sum + toMoney(getAccountRealBalance(account).amount), 0);
   const patrimonioNeto = valorTotalLiquido + debtSummary.deudasPorCobrarPendientes - debtSummary.deudasPorPagarPendientes;
 
   return {
