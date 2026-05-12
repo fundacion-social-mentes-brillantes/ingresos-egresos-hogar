@@ -14,24 +14,46 @@ export function BackupPage() {
   const { debts } = useDebts();
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [deletedTransactions, setDeletedTransactions] = useState<DeletedTransaction[]>([]);
   const [actionLogs, setActionLogs] = useState<ActionLog[]>([]);
 
   const loadHistory = async () => {
     if (!user) return;
-    const [deleted, logs] = await Promise.all([
-      getDeletedTransactions(user.uid, 12),
-      getActionLogs(user.uid, 20),
+    const [deleted, logs] = await Promise.allSettled([
+      getDeletedTransactions(user.uid, 200),
+      getActionLogs(user.uid, 200),
     ]);
-    setDeletedTransactions(deleted);
-    setActionLogs(logs);
+    setDeletedTransactions(deleted.status === 'fulfilled' ? deleted.value : []);
+    setActionLogs(logs.status === 'fulfilled' ? logs.value : []);
+    if (deleted.status === 'rejected' || logs.status === 'rejected') {
+      console.warn('Backup history partially unavailable:', { deleted, logs });
+    }
   };
 
   useEffect(() => {
     loadHistory().catch((error) => console.error('Could not load backup history:', error));
   }, [user]);
 
-  const exportBackup = () => exportFinanceWorkbook({ transactions, debts, accounts, fileName: `respaldo-completo-finanzas-${new Date().toISOString().slice(0, 10)}.xlsx` });
+  const exportBackup = async () => {
+    setExporting(true);
+    setMessage('');
+    try {
+      await exportFinanceWorkbook({
+        transactions,
+        debts,
+        accounts,
+        deletedTransactions,
+        actionLogs,
+        fileName: `respaldo-completo-finanzas-${new Date().toISOString().slice(0, 10)}.xlsx`,
+      });
+      setMessage(`Backup completo generado: ${transactions.length} movimientos, ${accounts.length} cuentas, ${debts.length} deudas, ${deletedTransactions.length} eliminados y ${actionLogs.length} acciones.`);
+    } catch (error: any) {
+      setMessage(error?.message || 'No pude generar el backup completo.');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const restoreById = async (deletedId: string) => {
     if (!user) return;
@@ -95,13 +117,13 @@ export function BackupPage() {
               <ShieldCheck className="h-7 w-7" />
             </div>
             <div>
-              <h2 className="text-lg font-black text-slate-100">Respaldo completo</h2>
-              <p className="mt-2 text-sm leading-relaxed text-slate-400">Incluye resumen, movimientos, deudas, cuentas, alertas y oportunidades en un Excel organizado.</p>
+              <h2 className="text-lg font-black text-slate-100">Respaldo completo profesional</h2>
+              <p className="mt-2 text-sm leading-relaxed text-slate-400">Incluye portada, resumen ejecutivo, auditoria de cuentas, libro mayor por cuenta, movimientos, deudas, categorias, mes a mes, eliminados, historial y guia de restauracion.</p>
             </div>
           </div>
-          <button onClick={exportBackup} className="premium-button mt-6 inline-flex w-full items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-black transition">
+          <button onClick={exportBackup} disabled={exporting} className="premium-button mt-6 inline-flex w-full items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-black transition disabled:opacity-50">
             <Download className="h-4 w-4" />
-            Descargar backup Excel
+            {exporting ? 'Generando backup...' : 'Descargar backup Excel completo'}
           </button>
         </section>
 
