@@ -1,0 +1,302 @@
+name: Fix Debts Account Movements
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/fix-debts-account-movements.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Patch debt account movements
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          # 1) Firestore helpers: debt creation/payment must move an account and create a linked transaction.
+          p = Path('src/lib/firestore.ts')
+          s = p.read_text(encoding='utf-8')
+
+          if 'interface DebtAccountMovementOptions' not in s:
+            insert_after = "export async function addDebt(uid: string, data: Omit<Debt, 'id' | 'createdAt' | 'updatedAt'>) {\n  const amountOriginal = Number(data.amountOriginal || 0);\n  const amountPaid = Number(data.amountPaid || 0);\n  return addDoc(debtCol(uid), cleanUndefinedFields({\n    ...data,\n    amountOriginal,\n    amountPaid,\n    currency: data.currency || 'COP',\n    status: data.status || (amountPaid >= amountOriginal ? 'paid' : amountPaid > 0 ? 'partial' : 'open'),\n    dueDate: data.dueDate ? Timestamp.fromDate(data.dueDate) : null,\n    closedAt: data.closedAt ? Timestamp.fromDate(data.closedAt) : null,\n    createdAt: serverTimestamp(),\n    updatedAt: serverTimestamp(),\n  }));\n}\n"
+            helper = r'''
+
+interface DebtAccountMovementOptions {
+  accountId: string;
+  accountName: string;
+  date?: Date;
+  rawText?: string;
+  source?: 'bot' | 'manual';
+  confidence?: number;
+}
+
+function requireDebtAccount(options: DebtAccountMovementOptions) {
+  if (!options?.accountId || !options?.accountName) {
+    throw new Error('Elige la cuenta para mover la plata de esta deuda.');
+  }
+}
+
+export async function addDebtWithAccountMovement(
+  uid: string,
+  data: Omit<Debt, 'id' | 'createdAt' | 'updatedAt'>,
+  options: DebtAccountMovementOptions
+) {
+  requireDebtAccount(options);
+  const amountOriginal = Number(data.amountOriginal || 0);
+  const amountPaid = Number(data.amountPaid || 0);
+  if (!amountOriginal || amountOriginal <= 0) throw new Error('El valor de la deuda debe ser mayor que cero.');
+
+  const batch = writeBatch(db);
+  const newDebtRef = doc(debtCol(uid));
+  const newTxRef = doc(txCol(uid));
+  const date = options.date || new Date();
+  const status = data.status || (amountPaid >= amountOriginal ? 'paid' : amountPaid > 0 ? 'partial' : 'open');
+  const isReceivable = data.direction === 'receivable';
+  const txType = isReceivable ? 'expense' : 'income';
+  const balanceChange = isReceivable ? -amountOriginal : amountOriginal;
+  const category = isReceivable ? 'Prestamo entregado' : 'Prestamo recibido';
+  const description = data.description || (isReceivable ? `Prestamo a ${data.personName}` : `Prestamo de ${data.personName}`);
+
+  batch.set(newDebtRef, cleanUndefinedFields({
+    ...data,
+    amountOriginal,
+    amountPaid,
+    currency: data.currency || 'COP',
+    status,
+    dueDate: data.dueDate ? Timestamp.fromDate(data.dueDate) : null,
+    closedAt: data.closedAt ? Timestamp.fromDate(data.closedAt) : null,
+    linkedAccountId: options.accountId,
+    linkedAccountName: options.accountName,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }));
+
+  batch.set(newTxRef, cleanUndefinedFields({
+    type: txType,
+    amount: amountOriginal,
+    currency: 'COP' as const,
+    category,
+    accountId: options.accountId,
+    accountName: options.accountName,
+    description,
+    date: Timestamp.fromDate(date),
+    rawText: options.rawText || description,
+    source: options.source || data.source || 'manual',
+    confidence: options.confidence ?? data.confidence ?? 1,
+    debtId: newDebtRef.id,
+    debtMovementKind: isReceivable ? 'loan_principal_out' : 'loan_principal_in',
+    excludeFromReports: true,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }));
+
+  batch.update(accRef(uid, options.accountId), cleanUndefinedFields({
+    currentBalance: increment(balanceChange),
+    updatedAt: serverTimestamp(),
+  }));
+
+  await batch.commit();
+  return newDebtRef;
+}
+'''
+            s = s.replace(insert_after, insert_after + helper)
+
+          if 'export async function registerDebtPaymentWithAccount' not in s:
+            insert_after = "export async function registerDebtPayment(uid: string, id: string, amount: number) {\n  const current = await getDoc(debtRef(uid, id));\n  if (!current.exists()) return;\n\n  const debt = normalizeDebt(current.id, current.data());\n  const newPaid = Math.min(debt.amountOriginal, debt.amountPaid + Number(amount || 0));\n  const newStatus = newPaid >= debt.amountOriginal ? 'paid' : newPaid > 0 ? 'partial' : 'open';\n  return updateDebt(uid, id, {\n    amountPaid: newPaid,\n    status: newStatus,\n    closedAt: newStatus === 'paid' ? new Date() : null,\n  });\n}\n"
+            helper = r'''
+
+export async function registerDebtPaymentWithAccount(
+  uid: string,
+  id: string,
+  amount: number,
+  options: DebtAccountMovementOptions
+) {
+  requireDebtAccount(options);
+  const current = await getDoc(debtRef(uid, id));
+  if (!current.exists()) throw new Error('No encontre la deuda para registrar el abono.');
+
+  const debt = normalizeDebt(current.id, current.data());
+  const remaining = Math.max(0, debt.amountOriginal - debt.amountPaid);
+  const appliedAmount = Math.min(remaining, Number(amount || 0));
+  if (!appliedAmount || appliedAmount <= 0) throw new Error('El abono debe ser mayor que cero.');
+
+  const isReceivable = debt.direction === 'receivable';
+  const txType = isReceivable ? 'income' : 'expense';
+  const balanceChange = isReceivable ? appliedAmount : -appliedAmount;
+  const newPaid = Math.min(debt.amountOriginal, debt.amountPaid + appliedAmount);
+  const newStatus = newPaid >= debt.amountOriginal ? 'paid' : newPaid > 0 ? 'partial' : 'open';
+  const date = options.date || new Date();
+  const description = isReceivable
+    ? `Abono recibido de ${debt.personName}: ${debt.description}`
+    : `Pago de deuda a ${debt.personName}: ${debt.description}`;
+
+  const batch = writeBatch(db);
+  const paymentTxRef = doc(txCol(uid));
+
+  batch.update(debtRef(uid, id), cleanUndefinedFields({
+    amountPaid: newPaid,
+    status: newStatus,
+    closedAt: newStatus === 'paid' ? new Date() : null,
+    lastPaymentAccountId: options.accountId,
+    lastPaymentAccountName: options.accountName,
+    updatedAt: serverTimestamp(),
+  }));
+
+  batch.set(paymentTxRef, cleanUndefinedFields({
+    type: txType,
+    amount: appliedAmount,
+    currency: 'COP' as const,
+    category: isReceivable ? 'Pago deuda recibida' : 'Pago deuda pagada',
+    accountId: options.accountId,
+    accountName: options.accountName,
+    description,
+    date: Timestamp.fromDate(date),
+    rawText: options.rawText || description,
+    source: options.source || 'manual',
+    confidence: options.confidence ?? 1,
+    debtId: id,
+    debtMovementKind: isReceivable ? 'debt_payment_in' : 'debt_payment_out',
+    excludeFromReports: true,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }));
+
+  batch.update(accRef(uid, options.accountId), cleanUndefinedFields({
+    currentBalance: increment(balanceChange),
+    updatedAt: serverTimestamp(),
+  }));
+
+  await batch.commit();
+  return paymentTxRef;
+}
+
+export async function closeDebtWithAccount(uid: string, id: string, options: DebtAccountMovementOptions) {
+  const current = await getDoc(debtRef(uid, id));
+  if (!current.exists()) throw new Error('No encontre la deuda para cerrarla.');
+  const debt = normalizeDebt(current.id, current.data());
+  const remaining = Math.max(0, debt.amountOriginal - debt.amountPaid);
+  if (remaining <= 0) return updateDebt(uid, id, { status: 'paid', closedAt: new Date() });
+  return registerDebtPaymentWithAccount(uid, id, remaining, options);
+}
+'''
+            s = s.replace(insert_after, insert_after + helper)
+
+          p.write_text(s, encoding='utf-8')
+
+          # 2) Manual debts page: require account for loan creation and debt payments.
+          p = Path('src/pages/DebtsPage.tsx')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace("import { useMemo, useState } from 'react';", "import { useEffect, useMemo, useState } from 'react';")
+          s = s.replace(
+            "import { addDebt, deleteDebt, registerDebtPayment, updateDebt } from '../lib/firestore';",
+            "import { addDebtWithAccountMovement, closeDebtWithAccount, deleteDebt, getAccounts, registerDebtPaymentWithAccount } from '../lib/firestore';"
+          )
+          s = s.replace("import type { Debt, DebtDirection } from '../types';", "import type { Account, Debt, DebtDirection } from '../types';")
+
+          if 'const [accounts, setAccounts]' not in s:
+            s = s.replace("  const [filter, setFilter] = useState<'open' | 'all' | 'receivable' | 'payable'>('open');\n  const [error, setError] = useState<string | null>(null);",
+            "  const [filter, setFilter] = useState<'open' | 'all' | 'receivable' | 'payable'>('open');\n  const [error, setError] = useState<string | null>(null);\n  const [accounts, setAccounts] = useState<Account[]>([]);\n  const [createAccountId, setCreateAccountId] = useState('');\n  const [paymentAccountId, setPaymentAccountId] = useState<Record<string, string>>({});")
+
+          if 'getAccounts(user.uid)' not in s.split('const filteredDebts')[0]:
+            s = s.replace("  const filteredDebts = useMemo(() => debts.filter((debt) => {",
+            "  useEffect(() => {\n    if (!user) return;\n    getAccounts(user.uid)\n      .then((items) => setAccounts(items.filter((account) => account.active)))\n      .catch((err) => console.warn('No pude cargar cuentas para deudas', err));\n  }, [user]);\n\n  const filteredDebts = useMemo(() => debts.filter((debt) => {")
+
+          s = s.replace("    if (!amountOriginal || amountOriginal <= 0) {\n      setError('Escribe un valor valido.');\n      return;\n    }\n\n    setSaving(true);",
+          "    if (!amountOriginal || amountOriginal <= 0) {\n      setError('Escribe un valor valido.');\n      return;\n    }\n    const account = accounts.find((item) => item.id === createAccountId);\n    if (!account) {\n      setError(form.direction === 'receivable' ? 'Elige la cuenta de donde sale la plata prestada.' : 'Elige la cuenta donde entra la plata prestada.');\n      return;\n    }\n\n    setSaving(true);")
+
+          s = s.replace("      await addDebt(user.uid, {\n        direction: form.direction,\n        personName: form.personName.trim(),\n        amountOriginal,\n        amountPaid: Math.max(0, Math.min(amountOriginal, amountPaid)),\n        currency: 'COP',\n        description: form.description.trim() || (form.direction === 'receivable' ? 'Plata prestada' : 'Deuda por pagar'),\n        notes: form.notes.trim() || undefined,\n        dueDate: parseDateInput(form.dueDate),\n        status: amountPaid >= amountOriginal ? 'paid' : amountPaid > 0 ? 'partial' : 'open',\n        source: 'manual',\n        confidence: 1,\n        closedAt: amountPaid >= amountOriginal ? new Date() : null,\n      });\n      setForm(emptyForm);",
+          "      await addDebtWithAccountMovement(user.uid, {\n        direction: form.direction,\n        personName: form.personName.trim(),\n        amountOriginal,\n        amountPaid: Math.max(0, Math.min(amountOriginal, amountPaid)),\n        currency: 'COP',\n        description: form.description.trim() || (form.direction === 'receivable' ? 'Plata prestada' : 'Deuda por pagar'),\n        notes: form.notes.trim() || undefined,\n        dueDate: parseDateInput(form.dueDate),\n        status: amountPaid >= amountOriginal ? 'paid' : amountPaid > 0 ? 'partial' : 'open',\n        source: 'manual',\n        confidence: 1,\n        closedAt: amountPaid >= amountOriginal ? new Date() : null,\n      }, { accountId: account.id, accountName: account.name, source: 'manual' });\n      setForm(emptyForm);\n      setCreateAccountId('');")
+
+          s = s.replace("    setPayingId(debt.id);\n    setError(null);\n    try {\n      await registerDebtPayment(user.uid, debt.id, amount);",
+          "    const account = accounts.find((item) => item.id === paymentAccountId[debt.id]);\n    if (!account) {\n      setError(debt.direction === 'receivable' ? 'Elige la cuenta donde entra el abono recibido.' : 'Elige la cuenta de donde sale el pago.');\n      return;\n    }\n\n    setPayingId(debt.id);\n    setError(null);\n    try {\n      await registerDebtPaymentWithAccount(user.uid, debt.id, amount, { accountId: account.id, accountName: account.name, source: 'manual' });")
+
+          s = s.replace("  const handleMarkPaid = async (debt: Debt) => {\n    if (!user) return;\n    await updateDebt(user.uid, debt.id, {\n      amountPaid: debt.amountOriginal,\n      status: 'paid',\n      closedAt: new Date(),\n    });\n  };",
+          "  const handleMarkPaid = async (debt: Debt) => {\n    if (!user) return;\n    const account = accounts.find((item) => item.id === paymentAccountId[debt.id]);\n    if (!account) {\n      setError(debt.direction === 'receivable' ? 'Elige la cuenta donde entra el pago final.' : 'Elige la cuenta de donde sale el pago final.');\n      return;\n    }\n    await closeDebtWithAccount(user.uid, debt.id, { accountId: account.id, accountName: account.name, source: 'manual' });\n    setPaymentAmount((prev) => ({ ...prev, [debt.id]: '' }));\n  };")
+
+          if 'value={createAccountId}' not in s:
+            s = s.replace("            <input className=\"lux-input w-full rounded-2xl px-4 py-3 text-sm outline-none\" placeholder=\"Valor total\" type=\"number\" value={form.amountOriginal} onChange={(event) => setForm((prev) => ({ ...prev, amountOriginal: event.target.value }))} />",
+            "            <input className=\"lux-input w-full rounded-2xl px-4 py-3 text-sm outline-none\" placeholder=\"Valor total\" type=\"number\" value={form.amountOriginal} onChange={(event) => setForm((prev) => ({ ...prev, amountOriginal: event.target.value }))} />\n            <select className=\"lux-input w-full rounded-2xl px-4 py-3 text-sm outline-none\" value={createAccountId} onChange={(event) => setCreateAccountId(event.target.value)}>\n              <option value=\"\">{form.direction === 'receivable' ? 'Cuenta de donde sale la plata' : 'Cuenta donde entra la plata'}</option>\n              {accounts.map((account) => <option key={account.id} value={account.id}>{account.name} - {formatCOP(account.currentBalance)}</option>)}\n            </select>\n            <p className=\"text-xs leading-relaxed text-slate-500\">{form.direction === 'receivable' ? 'Si prestas plata, se descuenta de esta cuenta.' : 'Si pides prestado, se suma a esta cuenta.'}</p>")
+
+          if 'paymentAccountId[debt.id]' not in s.split('placeholder="Abono o pago recibido"')[0][-2000:]:
+            s = s.replace("                        <input className=\"lux-input min-w-0 flex-1 rounded-2xl px-4 py-2.5 text-sm outline-none\" placeholder=\"Abono o pago recibido\" type=\"number\" value={paymentAmount[debt.id] || ''} onChange={(event) => setPaymentAmount((prev) => ({ ...prev, [debt.id]: event.target.value }))} />",
+            "                        <select className=\"lux-input min-w-0 flex-1 rounded-2xl px-4 py-2.5 text-sm outline-none\" value={paymentAccountId[debt.id] || ''} onChange={(event) => setPaymentAccountId((prev) => ({ ...prev, [debt.id]: event.target.value }))}>\n                          <option value=\"\">{debt.direction === 'receivable' ? 'Cuenta donde entra' : 'Cuenta de donde sale'}</option>\n                          {accounts.map((account) => <option key={account.id} value={account.id}>{account.name} - {formatCOP(account.currentBalance)}</option>)}\n                        </select>\n                        <input className=\"lux-input min-w-0 flex-1 rounded-2xl px-4 py-2.5 text-sm outline-none\" placeholder=\"Abono o pago recibido\" type=\"number\" value={paymentAmount[debt.id] || ''} onChange={(event) => setPaymentAmount((prev) => ({ ...prev, [debt.id]: event.target.value }))} />")
+
+          p.write_text(s, encoding='utf-8')
+
+          # 3) Chat bot: require/resolve account on debt creation and payment.
+          p = Path('src/pages/ChatPagePro.tsx')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('  addDebt,\n', '  addDebtWithAccountMovement,\n')
+          s = s.replace('  registerDebtPayment,\n', '  closeDebtWithAccount,\n  registerDebtPaymentWithAccount,\n')
+
+          if 'function resolveAccountMentionForDebt' not in s:
+            marker = "function personMatch(debt: Debt, name?: string): boolean {\n  if (!name) return true;\n  const a = normalizeText(debt.personName), b = normalizeText(name);\n  return a.includes(b) || b.includes(a);\n}\n"
+            helper = r'''
+
+function resolveAccountMentionForDebt(accounts: Account[], message: string, preferredName?: string | null): Account | null {
+  const preferred = normalizeText(preferredName || '');
+  if (preferred) {
+    const exact = accounts.find((account) => normalizeText(account.name) === preferred);
+    if (exact) return exact;
+  }
+  const text = normalizeText(message).replace(/\s+/g, ' ');
+  const exactInText = accounts
+    .filter((account) => text.includes(normalizeText(account.name)))
+    .sort((a, b) => normalizeText(b.name).length - normalizeText(a.name).length);
+  if (exactInText.length) return exactInText[0];
+  const alias = [
+    { words: ['nequi'], type: 'nequi', name: 'nequi' },
+    { words: ['daviplata', 'davi plata'], type: 'daviplata', name: 'daviplata' },
+    { words: ['efectivo'], type: 'cash', name: 'efectivo' },
+    { words: ['banco'], type: 'bank', name: 'banco' },
+  ].find((item) => item.words.some((word) => text.includes(word)));
+  if (alias) {
+    return accounts.find((account) => account.type === alias.type || normalizeText(account.name) === alias.name) || null;
+  }
+  return accounts.length === 1 ? accounts[0] : null;
+}
+'''
+            s = s.replace(marker, marker + helper)
+
+          s = s.replace("    await updateDebt(uid, debt.id, after);\n    await addActionLog(uid, { action: 'close_debt', entityType: 'debt', entityId: debt.id, description: `Marcó como pagada la deuda con ${debt.personName}`, before: debt, after, source: 'bot', status: 'executed' });\n    return `Confirmado. Marqué como pagada la deuda con ${debt.personName}.`;",
+          "    const accounts = await getAccounts(uid);\n    const account = resolveAccountMentionForDebt(accounts, pending.message, (pending.botAction.debtPayment as any)?.accountName);\n    if (!account) return `No cerré la deuda todavía. Dime la cuenta ${debt.direction === 'receivable' ? 'donde entra el pago' : 'de donde sale el pago'} para mover el saldo real.`;\n    await closeDebtWithAccount(uid, debt.id, { accountId: account.id, accountName: account.name, rawText: pending.message, source: 'bot', confidence: pending.botAction.confidence ?? 0.95 });\n    await addActionLog(uid, { action: 'close_debt', entityType: 'debt', entityId: debt.id, description: `Marcó como pagada la deuda con ${debt.personName}`, before: debt, after, source: 'bot', status: 'executed' });\n    return `Confirmado. Marqué como pagada la deuda con ${debt.personName} y moví el saldo en ${account.name}.`;")
+
+          s = s.replace("  await registerDebtPayment(uid, debt.id, amount);\n  await addActionLog(uid, { action: 'register_debt_payment', entityType: 'debt', entityId: debt.id, description: `Registró abono de ${formatCOP(amount)} en deuda con ${debt.personName}`, before: debt, after: { amount }, source: 'bot', status: 'executed' });\n  return `Confirmado. Registré el abono de ${formatCOP(amount)} en la deuda con ${debt.personName}.`;",
+          "  const accounts = await getAccounts(uid);\n  const account = resolveAccountMentionForDebt(accounts, pending.message, (pending.botAction.debtPayment as any)?.accountName);\n  if (!account) return `No registré el abono todavía. Dime la cuenta ${debt.direction === 'receivable' ? 'donde entró la plata' : 'de donde salió la plata'} para mover el saldo real.`;\n  await registerDebtPaymentWithAccount(uid, debt.id, amount, { accountId: account.id, accountName: account.name, rawText: pending.message, source: 'bot', confidence: pending.botAction.confidence ?? 0.95 });\n  await addActionLog(uid, { action: 'register_debt_payment', entityType: 'debt', entityId: debt.id, description: `Registró abono de ${formatCOP(amount)} en deuda con ${debt.personName}`, before: debt, after: { amount, accountName: account.name }, source: 'bot', status: 'executed' });\n  return `Confirmado. Registré el abono de ${formatCOP(amount)} en la deuda con ${debt.personName} y moví el saldo en ${account.name}.`;")
+
+          s = s.replace("      const created = await addDebt(uid, { direction: d.direction, personName: d.personName.trim(), amountOriginal: amount, amountPaid: 0, currency: 'COP', description: d.description || (d.direction === 'receivable' ? 'Plata prestada' : 'Deuda por pagar'), notes: d.notes || undefined, dueDate: botOptionalDate(d.dueDate), status: 'open', source: 'bot', confidence: action.confidence ?? 0.95, closedAt: null });\n      debtId = created.id;\n      await addActionLog(uid, { action: 'create_debt', entityType: 'debt', entityId: created.id, description: `Registró deuda de ${formatCOP(amount)} con ${d.personName}`, after: d, source: 'bot', status: 'executed' });\n      replyToUser = d.direction === 'receivable' ? `Listo, guardé que ${d.personName} te debe ${formatCOP(amount)}.` : `Listo, guardé que debes ${formatCOP(amount)} a ${d.personName}.`;",
+          "      const account = resolveAccountMentionForDebt(accounts, message, (d as any).accountName);\n      if (!account) {\n        replyToUser = d.direction === 'receivable'\n          ? `Entendí que prestaste ${formatCOP(amount)} a ${d.personName}, pero falta la cuenta de donde salió la plata. Ejemplo: desde Nequi, desde Banco o desde Efectivo.`\n          : `Entendí que pediste prestado ${formatCOP(amount)} a ${d.personName}, pero falta la cuenta donde entró la plata. Ejemplo: a Nequi, Banco o Efectivo.`;\n      } else {\n        const created = await addDebtWithAccountMovement(uid, { direction: d.direction, personName: d.personName.trim(), amountOriginal: amount, amountPaid: 0, currency: 'COP', description: d.description || (d.direction === 'receivable' ? 'Plata prestada' : 'Deuda por pagar'), notes: d.notes || undefined, dueDate: botOptionalDate(d.dueDate), status: 'open', source: 'bot', confidence: action.confidence ?? 0.95, closedAt: null }, { accountId: account.id, accountName: account.name, rawText: message, source: 'bot', confidence: action.confidence ?? 0.95 });\n        debtId = created.id;\n        await addActionLog(uid, { action: 'create_debt', entityType: 'debt', entityId: created.id, description: `Registró deuda de ${formatCOP(amount)} con ${d.personName}`, after: { ...d, accountName: account.name }, source: 'bot', status: 'executed' });\n        replyToUser = d.direction === 'receivable' ? `Listo, guardé que ${d.personName} te debe ${formatCOP(amount)} y desconté la plata de ${account.name}.` : `Listo, guardé que debes ${formatCOP(amount)} a ${d.personName} y sumé la plata en ${account.name}.`;\n      }")
+
+          p.write_text(s, encoding='utf-8')
+
+          # 4) DeepSeek safe route prompt: tell the model to include/ask account for loans.
+          p = Path('api/deepseek-chat-safe.ts')
+          if p.exists():
+            s = p.read_text(encoding='utf-8')
+            if 'REGLA CONTABLE CRITICA DE PRESTAMOS' not in s:
+              s = s.replace("REGLA CONTABLE CRITICA DE CUENTAS\n- Para crear movimientos", "REGLA CONTABLE CRITICA DE CUENTAS\n- Para crear movimientos")
+              s = s.replace("- No prometas cambios masivos, limpiezas ni correcciones multiples. Pide confirmacion o explica el flujo.", "- No prometas cambios masivos, limpiezas ni correcciones multiples. Pide confirmacion o explica el flujo.\n\nREGLA CONTABLE CRITICA DE PRESTAMOS\n- Si el usuario presta plata, es una deuda por cobrar y la plata debe salir de una cuenta real. Si no menciona cuenta, usa intent clarify y pregunta de que cuenta salio.\n- Si el usuario pide prestado, es una deuda por pagar y la plata debe entrar a una cuenta real. Si no menciona cuenta, usa intent clarify y pregunta a que cuenta entro.\n- Si el usuario registra abono o pago de deuda, debe mencionar cuenta de entrada/salida. Si no, pregunta antes de registrar.")
+              p.write_text(s, encoding='utf-8')
+          PY
+      - name: Build
+        run: |
+          npm install
+          npm run build
+      - name: Commit changes
+        run: |
+          git config user.name "fundacionsocial-debug"
+          git config user.email "fundacionsocial@gimnasioemocionalmb.com"
+          git add src/lib/firestore.ts src/pages/DebtsPage.tsx src/pages/ChatPagePro.tsx api/deepseek-chat-safe.ts
+          git commit -m "Mover saldos al crear y pagar deudas" || exit 0
+          git push
