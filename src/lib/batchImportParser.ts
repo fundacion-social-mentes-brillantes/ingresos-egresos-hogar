@@ -33,7 +33,7 @@ export function parseBatchImportText(text: string): BatchImportPreview | null {
   const movements: BatchImportMovement[] = [];
 
   for (const line of block.split(/\r?\n/)) {
-    const match = line.match(/^\s*\d+\.\s*(.+?)\s*(?:—|–|-)\s*\$?\s*([\d.,]+)/);
+    const match = line.match(/^\s*\d+[\).]\s*(.+?)\s*(?:\u2014|\u2013|-)\s*\$?\s*([\d.,]+)/);
     if (!match) continue;
     const description = match[1].trim();
     if (normalizeLabel(description) === '16 de febrero') continue;

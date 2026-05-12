@@ -29,6 +29,7 @@ import type {
   DeletedTransaction,
   ActionLog,
 } from '../types';
+import type { BatchImportPreview } from './batchImportParser';
 
 // -- Path helpers ------------------------------------------------------------
 const userRef = (uid: string) => doc(db, 'users', uid);
@@ -90,6 +91,15 @@ function toDate(value: unknown): Date {
 function toOptionalDate(value: unknown): Date | null {
   if (!value) return null;
   return toDate(value);
+}
+
+function normalizeComparableName(value: string): string {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function normalizeTransaction(id: string, data: Record<string, any>): Transaction {
@@ -190,6 +200,62 @@ export async function addAccount(uid: string, data: Omit<Account, 'id' | 'create
 
 export async function updateAccount(uid: string, id: string, data: Partial<Account>) {
   return updateDoc(accRef(uid, id), cleanUndefinedFields({ ...data, updatedAt: serverTimestamp() }));
+}
+
+export async function createBatchImportFromPreview(uid: string, preview: BatchImportPreview) {
+  const accountName = preview.accountName.trim();
+  const duplicate = (await getAccounts(uid)).find(
+    (account) => normalizeComparableName(account.name) === normalizeComparableName(accountName)
+  );
+
+  if (duplicate) {
+    throw new Error(`Ya existe una cuenta llamada ${duplicate.name}`);
+  }
+
+  const batch = writeBatch(db);
+  const newAccountRef = doc(accCol(uid));
+  const batchImportId = newAccountRef.id;
+  const importedAt = new Date();
+
+  batch.set(newAccountRef, cleanUndefinedFields({
+    name: accountName,
+    type: 'other' as const,
+    initialBalance: Number(preview.totalValue || 0),
+    currentBalance: Number(preview.expectedPendingBalance || 0),
+    active: true,
+    batchImportId,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }));
+
+  preview.movements.forEach((movement, index) => {
+    const newTransactionRef = doc(txCol(uid));
+    batch.set(newTransactionRef, cleanUndefinedFields({
+      type: 'expense' as const,
+      amount: Number(movement.amount || 0),
+      currency: 'COP' as const,
+      category: 'Abono / Descuento',
+      accountId: newAccountRef.id,
+      accountName,
+      description: movement.description,
+      date: Timestamp.fromDate(importedAt),
+      rawText: preview.rawText,
+      source: 'manual' as const,
+      confidence: 1,
+      batchImportId,
+      importRow: index + 1,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }));
+  });
+
+  await batch.commit();
+
+  return {
+    accountId: newAccountRef.id,
+    accountName,
+    count: preview.movements.length,
+  };
 }
 
 // -- Transactions ------------------------------------------------------------

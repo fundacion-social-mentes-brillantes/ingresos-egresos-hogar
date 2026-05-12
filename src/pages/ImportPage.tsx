@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react';
 import { Upload, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, Database, ArrowRight } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { addAccount, addTransaction, getAccounts } from '../lib/firestore';
+import { addAccount, addTransaction, createBatchImportFromPreview, getAccounts } from '../lib/firestore';
 import { DEFAULT_ACCOUNTS, formatCOP } from '../types';
 import type { Account } from '../types';
 import { parseExcelFile, type ImportedTransactionDraft, type ImportPreviewResult } from '../lib/importExcel';
+import { parseBatchImportText, validateBatchImportPreview, type BatchImportPreview } from '../lib/batchImportParser';
 import { AccountBrandMark } from '../components/visual/AccountBrandMark';
 
 async function ensureAccounts(uid: string): Promise<Account[]> {
@@ -44,8 +45,71 @@ export function ImportPage() {
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState<{ count: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [batchText, setBatchText] = useState('');
+  const [batchPreview, setBatchPreview] = useState<BatchImportPreview | null>(null);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const [batchSaving, setBatchSaving] = useState(false);
+  const [batchDone, setBatchDone] = useState<string | null>(null);
 
   const previewTotals = useMemo(() => totals(preview?.drafts || []), [preview]);
+  const batchValidationError = useMemo(
+    () => (batchPreview ? validateBatchImportPreview(batchPreview) : null),
+    [batchPreview]
+  );
+
+  const handleBatchTextChange = (value: string) => {
+    setBatchText(value);
+    setBatchPreview(null);
+    setBatchError(null);
+    setBatchDone(null);
+  };
+
+  const handleBatchValidate = () => {
+    const text = batchText.trim();
+    setBatchError(null);
+    setBatchDone(null);
+    setBatchPreview(null);
+
+    if (!text) {
+      setBatchError('Pega el texto completo de la cuenta antes de validar.');
+      return;
+    }
+
+    const result = parseBatchImportText(text);
+    if (!result) {
+      setBatchError('No pude reconocer la cuenta completa. Revisa nombre, valor inicial, total de movimientos, saldo pendiente y listado numerado.');
+      return;
+    }
+
+    const validationError = validateBatchImportPreview(result);
+    setBatchPreview(result);
+    setBatchError(validationError);
+  };
+
+  const handleBatchSave = async () => {
+    if (!user || !batchPreview) return;
+
+    const validationError = validateBatchImportPreview(batchPreview);
+    if (validationError) {
+      setBatchError(validationError);
+      return;
+    }
+
+    setBatchSaving(true);
+    setBatchError(null);
+    setBatchDone(null);
+
+    try {
+      const saved = await createBatchImportFromPreview(user.uid, batchPreview);
+      setBatchDone(`Guardado: ${saved.accountName} con ${saved.count} movimientos`);
+      setBatchText('');
+      setBatchPreview(null);
+    } catch (err: any) {
+      setBatchError(err?.message || 'No pude guardar el lote. No se guardo nada parcialmente.');
+    } finally {
+      setBatchSaving(false);
+    }
+  };
 
   const handleFile = async (file?: File) => {
     if (!file || !user) return;
@@ -125,6 +189,141 @@ export function ImportPage() {
         </p>
         {fileName && <p className="mt-3 rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-300">{fileName}</p>}
       </label>
+
+      <section className="lux-card p-5 sm:p-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <p className="lux-kicker">Importacion segura por lote</p>
+            <h2 className="mt-2 text-2xl font-black text-slate-100">Importacion contable por texto</h2>
+            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-500">
+              Pega una cuenta completa con sus movimientos. Primero valido totales y saldo; solo se guarda cuando confirmas.
+            </p>
+          </div>
+          <div className="premium-icon h-14 w-14 text-blue-200">
+            <FileSpreadsheet className="h-7 w-7" />
+          </div>
+        </div>
+
+        <div className="mt-5">
+          <textarea
+            value={batchText}
+            onChange={(event) => handleBatchTextChange(event.target.value)}
+            className="lux-input min-h-[280px] w-full resize-y rounded-[1.5rem] px-4 py-4 text-sm leading-relaxed outline-none"
+            placeholder={`Nombre de la cuenta: EDISON CAMIONETA\nValor inicial / total de la cuenta: $35.000.000\nTotal de movimientos abonados/descontados: $27.907.315\nSaldo pendiente: $7.092.685\n\nMovimientos:\n1. Sebastian - $1.000.000\n2. Impuesto Alexa - $3.000.000`}
+          />
+        </div>
+
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-xs leading-relaxed text-slate-500">
+            El guardado es atomico: cuenta y movimientos entran juntos, o no entra nada.
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <button
+              type="button"
+              onClick={() => handleBatchTextChange('')}
+              disabled={batchSaving || (!batchText && !batchPreview)}
+              className="soft-button inline-flex items-center justify-center rounded-2xl px-4 py-2.5 text-sm font-black transition disabled:opacity-50"
+            >
+              Limpiar
+            </button>
+            <button
+              type="button"
+              onClick={handleBatchValidate}
+              disabled={batchSaving || !batchText.trim()}
+              className="premium-button inline-flex items-center justify-center gap-2 rounded-2xl px-5 py-2.5 text-sm font-black transition disabled:opacity-50"
+            >
+              Validar texto
+              <ArrowRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+
+        {(batchError || batchValidationError) && (
+          <div className="mt-4 flex gap-3 rounded-3xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-100">
+            <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-300" />
+            <p>{batchError || batchValidationError}</p>
+          </div>
+        )}
+
+        {batchDone && (
+          <div className="mt-4 flex gap-3 rounded-3xl border border-green-500/30 bg-green-500/10 p-4 text-sm text-green-100">
+            <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-green-300" />
+            <p>{batchDone}</p>
+          </div>
+        )}
+
+        {batchPreview && (
+          <div className="mt-5 overflow-hidden rounded-[1.5rem] border border-slate-700/40 bg-slate-900/25">
+            <div className="border-b border-slate-700/40 p-4">
+              <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                <div>
+                  <h3 className="text-xl font-black text-slate-100">{batchPreview.accountName}</h3>
+                  <p className="mt-1 text-sm text-slate-500">
+                    {batchPreview.movements.length} movimientos detectados para guardar como Abono / Descuento.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleBatchSave}
+                  disabled={batchSaving || Boolean(batchValidationError)}
+                  className="premium-button inline-flex items-center justify-center gap-2 rounded-2xl px-5 py-3 text-sm font-black transition disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {batchSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}
+                  Confirmar y guardar lote
+                </button>
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                <div className="rounded-3xl border border-blue-500/20 bg-blue-500/10 p-4">
+                  <p className="text-xs font-black uppercase tracking-[0.16em] text-blue-300">Valor inicial</p>
+                  <p className="mt-1 text-lg font-black text-slate-100">{formatCOP(batchPreview.totalValue)}</p>
+                </div>
+                <div className="rounded-3xl border border-amber-500/20 bg-amber-500/10 p-4">
+                  <p className="text-xs font-black uppercase tracking-[0.16em] text-amber-300">Movimientos esperados</p>
+                  <p className="mt-1 text-lg font-black text-slate-100">{formatCOP(batchPreview.expectedMovementsTotal)}</p>
+                </div>
+                <div className="rounded-3xl border border-amber-500/20 bg-amber-500/10 p-4">
+                  <p className="text-xs font-black uppercase tracking-[0.16em] text-amber-300">Movimientos calculados</p>
+                  <p className="mt-1 text-lg font-black text-slate-100">{formatCOP(batchPreview.calculatedMovementsTotal)}</p>
+                </div>
+                <div className="rounded-3xl border border-green-500/20 bg-green-500/10 p-4">
+                  <p className="text-xs font-black uppercase tracking-[0.16em] text-green-300">Saldo esperado</p>
+                  <p className="mt-1 text-lg font-black text-slate-100">{formatCOP(batchPreview.expectedPendingBalance)}</p>
+                </div>
+                <div className="rounded-3xl border border-green-500/20 bg-green-500/10 p-4">
+                  <p className="text-xs font-black uppercase tracking-[0.16em] text-green-300">Saldo calculado</p>
+                  <p className="mt-1 text-lg font-black text-slate-100">{formatCOP(batchPreview.calculatedPendingBalance)}</p>
+                </div>
+                <div className="rounded-3xl border border-slate-700/40 bg-slate-900/35 p-4">
+                  <p className="text-xs font-black uppercase tracking-[0.16em] text-slate-500">Cantidad</p>
+                  <p className="mt-1 text-lg font-black text-slate-100">{batchPreview.movements.length} movimientos</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="custom-scrollbar max-h-[420px] overflow-auto">
+              <table className="lux-table w-full min-w-[640px] text-left text-sm">
+                <thead className="sticky top-0 text-xs uppercase tracking-wider text-slate-500 backdrop-blur-xl">
+                  <tr>
+                    <th className="px-4 py-3">Fila</th>
+                    <th className="px-4 py-3">Movimiento</th>
+                    <th className="px-4 py-3 text-right">Valor</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800">
+                  {batchPreview.movements.map((movement, index) => (
+                    <tr key={`${movement.description}-${index}`}>
+                      <td className="px-4 py-3 text-slate-500">{index + 1}</td>
+                      <td className="px-4 py-3 font-bold text-slate-100">{movement.description}</td>
+                      <td className="px-4 py-3 text-right font-black text-red-300">{formatCOP(movement.amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </section>
 
       {error && (
         <div className="flex gap-3 rounded-3xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-100">
