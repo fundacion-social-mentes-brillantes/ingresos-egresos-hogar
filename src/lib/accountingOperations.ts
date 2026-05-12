@@ -20,6 +20,7 @@ import {
   isProtectedTransaction,
   moneyEffect,
   parseCurrencyInput,
+  summarizeAccount,
   toMoney,
 } from './accounting';
 
@@ -38,24 +39,33 @@ function normalizeAmount(value: unknown): number {
   return parseCurrencyInput(value);
 }
 
+function toDate(value: any): Date {
+  if (value instanceof Date) return value;
+  if (typeof value?.toDate === 'function') return value.toDate();
+  const parsed = new Date(value || Date.now());
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
 async function getAccount(uid: string, accountId: string): Promise<Account> {
   const snap = await getDoc(accRef(uid, accountId));
   if (!snap.exists()) throw new Error('La cuenta no existe.');
-  return { id: snap.id, ...snap.data() } as Account;
+  return { id: snap.id, ...snap.data(), currentBalance: toMoney((snap.data() as any).currentBalance), initialBalance: toMoney((snap.data() as any).initialBalance), createdAt: toDate((snap.data() as any).createdAt) } as Account;
 }
 
 async function getTransaction(uid: string, id: string): Promise<Transaction> {
   const snap = await getDoc(txRef(uid, id));
   if (!snap.exists()) throw new Error('El movimiento no existe.');
   const data = snap.data() as Record<string, any>;
-  return {
-    id: snap.id,
-    ...data,
-    amount: toMoney(data.amount),
-    date: typeof data.date?.toDate === 'function' ? data.date.toDate() : new Date(data.date || Date.now()),
-    createdAt: typeof data.createdAt?.toDate === 'function' ? data.createdAt.toDate() : new Date(),
-    updatedAt: typeof data.updatedAt?.toDate === 'function' ? data.updatedAt.toDate() : new Date(),
-  } as Transaction;
+  return { id: snap.id, ...data, amount: toMoney(data.amount), date: toDate(data.date), createdAt: toDate(data.createdAt), updatedAt: toDate(data.updatedAt) } as Transaction;
+}
+
+async function getTransactionsForAccount(uid: string, account: Account): Promise<Transaction[]> {
+  const byId = await getDocs(query(txCol(uid), where('accountId', '==', account.id)));
+  const items = byId.docs.map((item) => {
+    const data = item.data() as Record<string, any>;
+    return { id: item.id, ...data, amount: toMoney(data.amount), date: toDate(data.date), createdAt: toDate(data.createdAt), updatedAt: toDate(data.updatedAt) } as Transaction;
+  });
+  return items;
 }
 
 function cashDelta(tx: Partial<Transaction> & { amount: number; type: TransactionType }): number {
@@ -65,23 +75,28 @@ function cashDelta(tx: Partial<Transaction> & { amount: number; type: Transactio
 export async function confirmRealBalance(uid: string, accountId: string, realBalanceInput: unknown) {
   const realBalance = normalizeAmount(realBalanceInput);
   const account = await getAccount(uid, accountId);
-  const calculatedBalance = toMoney(account.calculatedBalance ?? account.currentBalance ?? account.initialBalance ?? 0);
+  const txs = await getTransactionsForAccount(uid, account);
+  const summary = summarizeAccount(account, txs);
+  const calculatedBalance = summary.saldoFisicoCalculado;
   const reconciliation = calculateReconciliation(calculatedBalance, realBalance);
+
   await runTransaction(db, async (transaction) => {
     transaction.update(accRef(uid, accountId), {
       realBalance,
       lastReconciledBalance: realBalance,
       lastReconciledAt: serverTimestamp(),
+      calculatedBalance,
       reconciliationDifference: reconciliation.diferencia,
       updatedAt: serverTimestamp(),
     });
     transaction.set(doc(auditCol(uid)), {
-      action: 'confirm_real_balance',
+      action: 'confirm_real_balance_from_ledger',
       accountId,
       accountName: account.name,
       calculatedBalance,
       realBalance,
       difference: reconciliation.diferencia,
+      source: 'ledger_recalculation',
       createdAt: serverTimestamp(),
     });
   });
@@ -134,21 +149,9 @@ export async function createAccountingTransaction(uid: string, input: {
   const batch = writeBatch(db);
   batch.set(newTx, payload);
   if (delta !== 0) {
-    batch.update(accRef(uid, account.id), {
-      currentBalance: increment(delta),
-      calculatedBalance: increment(delta),
-      updatedAt: serverTimestamp(),
-    });
+    batch.update(accRef(uid, account.id), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
   }
-  batch.set(doc(auditCol(uid)), {
-    action: 'create_accounting_transaction',
-    transactionId: newTx.id,
-    accountId: account.id,
-    amount,
-    movementKind,
-    delta,
-    createdAt: serverTimestamp(),
-  });
+  batch.set(doc(auditCol(uid)), { action: 'create_accounting_transaction', transactionId: newTx.id, accountId: account.id, amount, movementKind, delta, createdAt: serverTimestamp() });
   await batch.commit();
   return newTx;
 }
@@ -156,6 +159,7 @@ export async function createAccountingTransaction(uid: string, input: {
 export async function reverseAccountingTransaction(uid: string, transactionId: string, reason = 'Anulacion contable') {
   const original = await getTransaction(uid, transactionId);
   if (original.isReversed) throw new Error('Este movimiento ya fue reversado.');
+  if (original.reversalOf) throw new Error('Un reverso no se reversa directamente. Corrige creando el movimiento correcto.');
   const amount = toMoney(original.amount);
   const reverseType: TransactionType = original.type === 'income' ? 'expense' : 'income';
   const reverseRef = doc(txCol(uid));
@@ -183,28 +187,12 @@ export async function reverseAccountingTransaction(uid: string, transactionId: s
   };
   const delta = affectsCash(original) ? (original.type === 'income' ? -amount : amount) : 0;
   const batch = writeBatch(db);
-  batch.update(txRef(uid, original.id), {
-    isReversed: true,
-    reversedAt: serverTimestamp(),
-    reversalReason: reason,
-    updatedAt: serverTimestamp(),
-  });
+  batch.update(txRef(uid, original.id), { isReversed: true, reversedAt: serverTimestamp(), reversalReason: reason, updatedAt: serverTimestamp() });
   batch.set(reverseRef, reversePayload);
   if (delta !== 0 && original.accountId) {
-    batch.update(accRef(uid, original.accountId), {
-      currentBalance: increment(delta),
-      calculatedBalance: increment(delta),
-      updatedAt: serverTimestamp(),
-    });
+    batch.update(accRef(uid, original.accountId), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
   }
-  batch.set(doc(auditCol(uid)), {
-    action: 'reverse_transaction',
-    transactionId: original.id,
-    reverseTransactionId: reverseRef.id,
-    reason,
-    delta,
-    createdAt: serverTimestamp(),
-  });
+  batch.set(doc(auditCol(uid)), { action: 'reverse_transaction', transactionId: original.id, reverseTransactionId: reverseRef.id, reason, delta, createdAt: serverTimestamp() });
   await batch.commit();
   return reverseRef;
 }
@@ -214,26 +202,50 @@ export async function validateTransferIntegrity(uid: string, transferId: string)
   const items = snap.docs.map((item) => ({ id: item.id, ...item.data() } as Transaction));
   const out = items.filter((tx) => inferMovementKind(tx) === 'transfer_out');
   const input = items.filter((tx) => inferMovementKind(tx) === 'transfer_in');
-  const valid = items.length === 2 && out.length === 1 && input.length === 1 && toMoney(out[0].amount) === toMoney(input[0].amount);
-  return { valid, items, message: valid ? 'Transferencia integra' : 'Transferencia rota o incompleta' };
+  const valid = items.length === 2 && out.length === 1 && input.length === 1 && toMoney(out[0].amount) === toMoney(input[0].amount) && !items.some((tx) => tx.isReversed || tx.reversalOf);
+  return { valid, items, message: valid ? 'Transferencia integra' : 'Transferencia rota, incompleta o ya reversada' };
 }
 
 export async function reverseTransfer(uid: string, transferId: string, reason = 'Anulacion de transferencia') {
   const integrity = await validateTransferIntegrity(uid, transferId);
   if (!integrity.valid) throw new Error(integrity.message);
-  for (const tx of integrity.items) {
-    await reverseAccountingTransaction(uid, tx.id, reason);
+  const batch = writeBatch(db);
+  for (const item of integrity.items) {
+    const tx = await getTransaction(uid, item.id);
+    const amount = toMoney(tx.amount);
+    const reverseType: TransactionType = tx.type === 'income' ? 'expense' : 'income';
+    const delta = tx.type === 'income' ? -amount : amount;
+    const reverseRef = doc(txCol(uid));
+    batch.update(txRef(uid, tx.id), { isReversed: true, reversedAt: serverTimestamp(), reversalReason: reason, updatedAt: serverTimestamp() });
+    batch.set(reverseRef, {
+      type: reverseType,
+      amount,
+      currency: 'COP',
+      category: 'Reverso transferencia',
+      accountId: tx.accountId,
+      accountName: tx.accountName,
+      description: `Reverso transferencia: ${tx.description}`,
+      date: serverTimestamp(),
+      rawText: reason,
+      source: 'manual',
+      confidence: 1,
+      movementKind: 'reconciliation_adjustment',
+      affectsCash: true,
+      affectsReport: false,
+      affectsDebt: false,
+      excludeFromReports: true,
+      reversalOf: tx.id,
+      transferId,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    batch.update(accRef(uid, tx.accountId), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
   }
+  batch.set(doc(auditCol(uid)), { action: 'reverse_transfer', transferId, reason, createdAt: serverTimestamp() });
+  await batch.commit();
 }
 
-export async function createPayableExpense(uid: string, input: {
-  accountId: string;
-  personName: string;
-  amount: unknown;
-  description: string;
-  category?: string;
-  dueDate?: Date | null;
-}) {
+export async function createPayableExpense(uid: string, input: { accountId: string; personName: string; amount: unknown; description: string; category?: string; dueDate?: Date | null; }) {
   const amount = normalizeAmount(input.amount);
   if (amount <= 0) throw new Error('El valor debe ser mayor que cero.');
   const account = await getAccount(uid, input.accountId);
@@ -277,6 +289,7 @@ export async function createPayableExpense(uid: string, input: {
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
+  batch.set(doc(auditCol(uid)), { action: 'create_payable_expense', debtId: debt.id, transactionId: tx.id, amount, createdAt: serverTimestamp() });
   await batch.commit();
   return { debt, transaction: tx };
 }
@@ -291,33 +304,36 @@ export async function payPayableExpense(uid: string, debtId: string, amountInput
   const applied = Math.min(amount, Math.max(0, toMoney(debt.amountOriginal) - toMoney(debt.amountPaid)));
   const newPaid = toMoney(debt.amountPaid) + applied;
   const newStatus = newPaid >= toMoney(debt.amountOriginal) ? 'paid' : 'partial';
-  const tx = await createAccountingTransaction(uid, {
+  const tx = doc(txCol(uid));
+  const batch = writeBatch(db);
+  batch.set(tx, {
     type: 'expense',
     amount: applied,
-    accountId: account.id,
+    currency: 'COP',
     category: 'Pago gasto pendiente',
+    accountId: account.id,
+    accountName: account.name,
     description: `Pago de gasto pendiente: ${debt.description}`,
+    date: serverTimestamp(),
+    rawText: `Pago de gasto pendiente ${debtId}`,
+    source: 'manual',
+    confidence: 1,
     movementKind: 'payable_expense_paid',
+    affectsCash: true,
     affectsReport: false,
     affectsDebt: true,
     debtId,
     excludeFromReports: true,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
   });
-  await runTransaction(db, async (transaction) => {
-    transaction.update(debtRef(uid, debtId), {
-      amountPaid: newPaid,
-      status: newStatus,
-      closedAt: newStatus === 'paid' ? serverTimestamp() : null,
-      lastPaymentAccountId: account.id,
-      lastPaymentAccountName: account.name,
-      updatedAt: serverTimestamp(),
-    });
-  });
+  batch.update(debtRef(uid, debtId), { amountPaid: newPaid, status: newStatus, closedAt: newStatus === 'paid' ? serverTimestamp() : null, lastPaymentAccountId: account.id, lastPaymentAccountName: account.name, updatedAt: serverTimestamp() });
+  batch.update(accRef(uid, account.id), { currentBalance: increment(-applied), calculatedBalance: increment(-applied), updatedAt: serverTimestamp() });
+  batch.set(doc(auditCol(uid)), { action: 'pay_payable_expense', debtId, transactionId: tx.id, amount: applied, createdAt: serverTimestamp() });
+  await batch.commit();
   return tx;
 }
 
 export function assertSafeManualMutation(tx: Partial<Transaction>) {
-  if (isProtectedTransaction(tx)) {
-    throw new Error('Movimiento protegido: usa reverso contable para conservar trazabilidad.');
-  }
+  if (isProtectedTransaction(tx)) throw new Error('Movimiento protegido: usa reverso contable para conservar trazabilidad.');
 }
