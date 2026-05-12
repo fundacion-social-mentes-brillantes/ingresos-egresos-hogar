@@ -208,25 +208,35 @@ export async function createBatchImportFromPreview(uid: string, preview: BatchIm
     (account) => normalizeComparableName(account.name) === normalizeComparableName(accountName)
   );
 
-  if (duplicate) {
-    throw new Error(`Ya existe una cuenta llamada ${duplicate.name}`);
-  }
-
   const batch = writeBatch(db);
-  const newAccountRef = doc(accCol(uid));
-  const batchImportId = newAccountRef.id;
+  const targetAccountRef = duplicate ? accRef(uid, duplicate.id) : doc(accCol(uid));
+  const batchImportId = targetAccountRef.id;
   const importedAt = new Date();
 
-  batch.set(newAccountRef, cleanUndefinedFields({
-    name: accountName,
-    type: 'other' as const,
-    initialBalance: Number(preview.totalValue || 0),
-    currentBalance: Number(preview.expectedPendingBalance || 0),
-    active: true,
-    batchImportId,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  }));
+  if (duplicate?.batchImportId) {
+    throw new Error(`La cuenta ${duplicate.name} ya parece tener una importacion por lote. No se guardo nada para evitar duplicados.`);
+  }
+
+  if (duplicate) {
+    batch.update(targetAccountRef, cleanUndefinedFields({
+      initialBalance: Number(preview.totalValue || 0),
+      currentBalance: Number(preview.expectedPendingBalance || 0),
+      active: true,
+      batchImportId,
+      updatedAt: serverTimestamp(),
+    }));
+  } else {
+    batch.set(targetAccountRef, cleanUndefinedFields({
+      name: accountName,
+      type: 'other' as const,
+      initialBalance: Number(preview.totalValue || 0),
+      currentBalance: Number(preview.expectedPendingBalance || 0),
+      active: true,
+      batchImportId,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }));
+  }
 
   preview.movements.forEach((movement, index) => {
     const newTransactionRef = doc(txCol(uid));
@@ -235,13 +245,14 @@ export async function createBatchImportFromPreview(uid: string, preview: BatchIm
       amount: Number(movement.amount || 0),
       currency: 'COP' as const,
       category: 'Abono / Descuento',
-      accountId: newAccountRef.id,
+      accountId: targetAccountRef.id,
       accountName,
       description: movement.description,
       date: Timestamp.fromDate(importedAt),
       rawText: preview.rawText,
       source: 'manual' as const,
       confidence: 1,
+      excludeFromReports: true,
       batchImportId,
       importRow: index + 1,
       createdAt: serverTimestamp(),
@@ -252,8 +263,8 @@ export async function createBatchImportFromPreview(uid: string, preview: BatchIm
   await batch.commit();
 
   return {
-    accountId: newAccountRef.id,
-    accountName,
+    accountId: targetAccountRef.id,
+    accountName: duplicate?.name || accountName,
     count: preview.movements.length,
   };
 }

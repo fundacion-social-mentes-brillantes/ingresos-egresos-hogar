@@ -124,7 +124,7 @@ export function useFinancialSummary(transactions: Transaction[]): FinancialSumma
   const start = startOfMonth(now);
   const end = endOfMonth(now);
 
-  const monthly = transactions.filter(t => t.date >= start && t.date <= end);
+  const monthly = transactions.filter(t => !t.excludeFromReports && t.date >= start && t.date <= end);
 
   const totalIncome = monthly.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
   const totalExpenses = monthly.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
@@ -148,5 +148,5 @@ export function useFinancialSummary(transactions: Transaction[]): FinancialSumma
 
 export function useLast7Days(transactions: Transaction[]) {
   const cutoff = subDays(startOfDay(new Date()), 6);
-  return transactions.filter(t => t.date >= cutoff && t.type === 'expense');
+  return transactions.filter(t => !t.excludeFromReports && t.date >= cutoff && t.type === 'expense');
 }
