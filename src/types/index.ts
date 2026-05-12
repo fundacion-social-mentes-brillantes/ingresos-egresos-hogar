@@ -10,6 +10,24 @@ export type DebtStatus = 'open' | 'partial' | 'paid';
 export type DebtSource = 'bot' | 'manual';
 export type AiRiskLevel = 'low' | 'medium' | 'high';
 export type AiAssistantMode = 'registro' | 'analisis' | 'coach' | 'emocional' | 'estrategia' | 'explicacion' | 'conversacion';
+
+export type MovementKind =
+  | 'income'
+  | 'expense'
+  | 'transfer_out'
+  | 'transfer_in'
+  | 'loan_given'
+  | 'loan_received'
+  | 'loan_payment_received'
+  | 'debt_payment_made'
+  | 'payable_expense_created'
+  | 'payable_expense_paid'
+  | 'receivable_created'
+  | 'reconciliation_adjustment'
+  | 'opening_balance'
+  | 'historical_non_reportable'
+  | 'legacy';
+
 export type BotIntent =
   | 'create_transaction'
   | 'query_summary'
@@ -44,10 +62,23 @@ export interface Account {
   name: string;
   type: AccountType;
   initialBalance: number;
+  /**
+   * Legacy/current stored balance. It is maintained for backwards compatibility.
+   * Professional reconciliation must prefer realBalance when present and must
+   * calculate the accounting balance from initialBalance + ledger movements.
+   */
   currentBalance: number;
+  /** User-confirmed real-world balance from bank/cash/wallet statement. */
+  realBalance?: number | null;
+  /** Calculated by the accounting engine or persisted as an optional snapshot. */
+  calculatedBalance?: number | null;
+  lastReconciledAt?: Date | null;
+  lastReconciledBalance?: number | null;
+  reconciliationDifference?: number | null;
   active: boolean;
   createdAt: Date;
   batchImportId?: string;
+  migrationVersion?: number;
 }
 
 export interface Transaction {
@@ -68,10 +99,23 @@ export interface Transaction {
   batchImportId?: string;
   importRow?: number;
   excludeFromReports?: boolean;
+  movementKind?: MovementKind;
+  affectsCash?: boolean;
+  affectsReport?: boolean;
+  affectsDebt?: boolean;
+  affectsEquity?: boolean;
   transferId?: string;
   transferDirection?: 'in' | 'out';
   transferAccountId?: string;
   transferAccountName?: string;
+  debtId?: string;
+  debtMovementKind?: string;
+  pairId?: string;
+  reversalOf?: string;
+  reversalReason?: string;
+  reversedAt?: Date | null;
+  isReversed?: boolean;
+  legacy?: boolean;
 }
 
 export interface DeletedTransaction extends Transaction {
@@ -97,6 +141,14 @@ export interface Debt {
   createdAt: Date;
   updatedAt: Date;
   closedAt?: Date | null;
+  linkedAccountId?: string;
+  linkedAccountName?: string;
+  lastPaymentAccountId?: string;
+  lastPaymentAccountName?: string;
+  debtKind?: 'loan' | 'payable_expense' | 'other';
+  isReversed?: boolean;
+  reversalOf?: string;
+  migrationVersion?: number;
 }
 
 export interface AiInsight {
