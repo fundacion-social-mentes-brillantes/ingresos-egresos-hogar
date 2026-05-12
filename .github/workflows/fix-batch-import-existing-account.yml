@@ -1,0 +1,50 @@
+name: Fix Batch Import Existing Account
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/fix-batch-import-existing-account.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Patch firestore batch import
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/lib/firestore.ts')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('  const duplicate = (await getAccounts(uid)).find(\n    (account) => normalizeComparableName(account.name) === normalizeComparableName(accountName)\n  );\n\n  if (duplicate) {\n    throw new Error(`Ya existe una cuenta llamada ${duplicate.name}`);\n  }\n\n  const batch = writeBatch(db);\n  const newAccountRef = doc(accCol(uid));\n  const batchImportId = newAccountRef.id;\n  const importedAt = new Date();\n\n  batch.set(newAccountRef, cleanUndefinedFields({\n    name: accountName,\n    type: \'other\' as const,\n    initialBalance: Number(preview.totalValue || 0),\n    currentBalance: Number(preview.expectedPendingBalance || 0),\n    active: true,\n    batchImportId,\n    createdAt: serverTimestamp(),\n    updatedAt: serverTimestamp(),\n  }));', '  const duplicate = (await getAccounts(uid)).find(\n    (account) => normalizeComparableName(account.name) === normalizeComparableName(accountName)\n  );\n\n  const batch = writeBatch(db);\n  const targetAccountRef = duplicate ? accRef(uid, duplicate.id) : doc(accCol(uid));\n  const batchImportId = targetAccountRef.id;\n  const importedAt = new Date();\n\n  if (duplicate?.batchImportId) {\n    throw new Error(`La cuenta ${duplicate.name} ya parece tener una importacion por lote. No se guardo nada para evitar duplicados.`);\n  }\n\n  if (duplicate) {\n    batch.update(targetAccountRef, cleanUndefinedFields({\n      initialBalance: Number(preview.totalValue || 0),\n      currentBalance: Number(preview.expectedPendingBalance || 0),\n      active: true,\n      batchImportId,\n      updatedAt: serverTimestamp(),\n    }));\n  } else {\n    batch.set(targetAccountRef, cleanUndefinedFields({\n      name: accountName,\n      type: \'other\' as const,\n      initialBalance: Number(preview.totalValue || 0),\n      currentBalance: Number(preview.expectedPendingBalance || 0),\n      active: true,\n      batchImportId,\n      createdAt: serverTimestamp(),\n      updatedAt: serverTimestamp(),\n    }));\n  }')
+          s = s.replace('      accountId: newAccountRef.id,', '      accountId: targetAccountRef.id,')
+          s = s.replace("      source: 'manual' as const,\n      confidence: 1,\n      batchImportId,", "      source: 'manual' as const,\n      confidence: 1,\n      excludeFromReports: true,\n      batchImportId,")
+          s = s.replace('    accountId: newAccountRef.id,\n    accountName,', '    accountId: targetAccountRef.id,\n    accountName: duplicate?.name || accountName,')
+          p.write_text(s, encoding='utf-8')
+
+          h = Path('src/hooks/useTransactions.ts')
+          t = h.read_text(encoding='utf-8')
+          t = t.replace('  const monthly = transactions.filter(t => t.date >= start && t.date <= end);', '  const monthly = transactions.filter(t => !t.excludeFromReports && t.date >= start && t.date <= end);')
+          t = t.replace('  return transactions.filter(t => t.date >= cutoff && t.type === \'expense\');', '  return transactions.filter(t => !t.excludeFromReports && t.date >= cutoff && t.type === \'expense\');')
+          h.write_text(t, encoding='utf-8')
+          PY
+      - name: Build
+        run: |
+          npm install
+          npm run build
+      - name: Commit changes
+        run: |
+          git config user.name "fundacionsocial-debug"
+          git config user.email "fundacionsocial@gimnasioemocionalmb.com"
+          git add src/lib/firestore.ts src/hooks/useTransactions.ts
+          git commit -m "Permitir importacion por lote en cuenta existente segura" || exit 0
+          git push
