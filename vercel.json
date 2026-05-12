@@ -1,16 +1,8 @@
 {
-  "routes": [
+  "rewrites": [
     {
-      "src": "/api/deepseek-chat",
-      "dest": "/api/deepseek-chat-safe"
-    },
-    {
-      "src": "/api/(.*)",
-      "dest": "/api/$1"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/"
+      "source": "/(.*)",
+      "destination": "/"
     }
   ]
 }
