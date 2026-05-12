@@ -5,6 +5,7 @@ import { db } from '../lib/firebase';
 import { getAccounts } from '../lib/firestore';
 import type { Transaction, Account, FinancialSummary } from '../types';
 import { startOfMonth, endOfMonth, subDays, startOfDay } from 'date-fns';
+import { buildFinancialSummaryForPeriod, isReportableFinancialTransaction, toMoney } from '../lib/accounting';
 
 function toDate(value: unknown): Date {
   if (value instanceof Date) return value;
@@ -22,7 +23,7 @@ function normalizeTransaction(id: string, data: Record<string, any>): Transactio
   return {
     id,
     ...data,
-    amount: Number(data.amount || 0),
+    amount: toMoney(data.amount),
     date: toDate(data.date),
     createdAt: toDate(data.createdAt),
     updatedAt: toDate(data.updatedAt),
@@ -33,8 +34,8 @@ function normalizeAccount(id: string, data: Record<string, any>): Account {
   return {
     id,
     ...data,
-    currentBalance: Number(data.currentBalance || 0),
-    initialBalance: Number(data.initialBalance || 0),
+    currentBalance: toMoney(data.currentBalance),
+    initialBalance: toMoney(data.initialBalance),
     active: data.active ?? true,
     createdAt: toDate(data.createdAt),
   } as Account;
@@ -78,7 +79,7 @@ export function useTransactions() {
     const transactionsQuery = query(
       collection(db, `users/${user.uid}/transactions`),
       orderBy('date', 'desc'),
-      limit(200)
+      limit(500)
     );
 
     const accountsQuery = query(
@@ -123,30 +124,10 @@ export function useFinancialSummary(transactions: Transaction[]): FinancialSumma
   const now = new Date();
   const start = startOfMonth(now);
   const end = endOfMonth(now);
-
-  const monthly = transactions.filter(t => !t.excludeFromReports && t.date >= start && t.date <= end);
-
-  const totalIncome = monthly.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
-  const totalExpenses = monthly.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
-
-  const byCategory = monthly
-    .filter(t => t.type === 'expense')
-    .reduce((acc, t) => {
-      acc[t.category] = (acc[t.category] || 0) + t.amount;
-      return acc;
-    }, {} as Record<string, number>);
-
-  return {
-    totalIncome,
-    totalExpenses,
-    balance: totalIncome - totalExpenses,
-    byCategory,
-    range: 'this_month',
-    generatedAt: now,
-  };
+  return buildFinancialSummaryForPeriod(transactions, start, end, 'this_month');
 }
 
 export function useLast7Days(transactions: Transaction[]) {
   const cutoff = subDays(startOfDay(new Date()), 6);
-  return transactions.filter(t => !t.excludeFromReports && t.date >= cutoff && t.type === 'expense');
+  return transactions.filter(t => isReportableFinancialTransaction(t) && t.date >= cutoff && t.type === 'expense');
 }
