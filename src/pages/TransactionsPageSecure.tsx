@@ -1,299 +1,128 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { format } from 'date-fns';
-import { es } from 'date-fns/locale';
-import { ArrowDownLeft, ArrowUpRight, Loader2, Pencil, Plus, RotateCcw, Search, ShieldCheck, Trash2 } from 'lucide-react';
+import { Loader2, Pencil, Plus, RotateCcw, Search, ShieldCheck, Trash2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { EmptyState } from '../components/visual/EmptyState';
-import { Button } from '../components/ui/Button';
-import { Input, Select } from '../components/ui/Input';
 import { useTransactions } from '../hooks/useTransactions';
-import { getAccounts } from '../lib/firestore';
-import { createAccountingTransaction, reverseAccountingTransaction } from '../lib/accountingOperations';
+import { getAccounts, transferBetweenAccounts } from '../lib/firestore';
+import { createAccountingTransaction, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
 import { inferMovementKind, isProtectedTransaction, isReportableFinancialTransaction, parseCurrencyInput, toMoney } from '../lib/accounting';
 import { CATEGORIES, formatCOP } from '../types';
 import type { Account, Transaction, TransactionType } from '../types';
-import clsx from 'clsx';
 
-type TxFormState = {
-  type: TransactionType;
-  amount: string;
-  category: string;
-  accountId: string;
-  description: string;
-  date: string;
-  time: string;
-};
+type FormState = { type: TransactionType; amount: string; category: string; accountId: string; description: string; date: string; time: string };
 
-const pad = (value: number) => String(value).padStart(2, '0');
-const toDateInput = (date = new Date()) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-const toTimeInput = (date = new Date()) => `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+const pad = (n: number) => String(n).padStart(2, '0');
+const today = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const asDate = (date: string, time: string) => { const d = new Date(`${date || today()}T${time || '12:00'}:00`); return Number.isNaN(d.getTime()) ? new Date() : d; };
+const blank = (accounts: Account[]): FormState => ({ type: 'expense', amount: '', category: 'Otros', accountId: accounts[0]?.id || '', description: '', date: today(), time: nowTime() });
+const isTransfer = (tx: Transaction | null) => Boolean(tx?.transferId) || (tx ? inferMovementKind(tx).startsWith('transfer') : false);
 
-function buildDate(date: string, time: string): Date {
-  const parsed = new Date(`${date || toDateInput()}T${time || '12:00'}:00`);
-  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+function formFromTx(tx: Transaction, accounts: Account[]): FormState {
+  return { type: tx.type, amount: String(tx.amount), category: tx.category || (tx.type === 'income' ? 'Ingreso' : 'Otros'), accountId: tx.accountId || accounts[0]?.id || '', description: tx.description || '', date: today(), time: nowTime() };
 }
 
-function defaultForm(accounts: Account[], type: TransactionType = 'expense'): TxFormState {
-  return {
-    type,
-    amount: '',
-    category: type === 'income' ? 'Ingreso' : 'Otros',
-    accountId: accounts[0]?.id || '',
-    description: '',
-    date: toDateInput(),
-    time: toTimeInput(),
-  };
-}
-
-function formFromTransaction(tx: Transaction): TxFormState {
-  return {
-    type: tx.type,
-    amount: String(tx.amount),
-    category: tx.category || (tx.type === 'income' ? 'Ingreso' : 'Otros'),
-    accountId: tx.accountId,
-    description: tx.description || '',
-    date: toDateInput(tx.date),
-    time: toTimeInput(tx.date),
-  };
-}
-
-function kindLabel(tx: Transaction): string {
+function label(tx: Transaction) {
   const kind = inferMovementKind(tx);
-  const labels: Record<string, string> = {
-    income: 'Ingreso reportable',
-    expense: 'Gasto reportable',
-    transfer_out: 'Transferencia salida',
-    transfer_in: 'Transferencia entrada',
-    loan_given: 'Préstamo otorgado',
-    loan_received: 'Préstamo recibido',
-    loan_payment_received: 'Abono recibido',
-    debt_payment_made: 'Pago de deuda',
-    payable_expense_created: 'Gasto pendiente creado',
-    payable_expense_paid: 'Gasto pendiente pagado',
-    reconciliation_adjustment: 'Reverso / ajuste',
-    historical_non_reportable: 'Histórico / no reportable',
-    legacy: 'Legacy / revisar',
-  };
-  return labels[kind] || kind;
+  if (kind === 'transfer_in') return 'Transferencia entrada';
+  if (kind === 'transfer_out') return 'Transferencia salida';
+  if (kind === 'loan_given') return 'Prestamo otorgado';
+  if (kind === 'loan_received') return 'Prestamo recibido';
+  if (kind === 'loan_payment_received') return 'Abono recibido';
+  if (kind === 'debt_payment_made') return 'Pago de deuda';
+  if (kind === 'reconciliation_adjustment') return 'Ajuste';
+  if (kind === 'historical_non_reportable') return 'Historico';
+  return tx.type === 'income' ? 'Ingreso' : 'Gasto';
 }
 
 export function TransactionsPage() {
   const { user } = useAuth();
   const { transactions, loading, refresh } = useTransactions();
-  const [filterType, setFilterType] = useState<'all' | 'income' | 'expense'>('all');
-  const [search, setSearch] = useState('');
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [formOpen, setFormOpen] = useState(false);
-  const [editingTx, setEditingTx] = useState<Transaction | null>(null);
-  const [form, setForm] = useState<TxFormState>(() => defaultForm([]));
-  const [formError, setFormError] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [kind, setKind] = useState<'all' | 'income' | 'expense'>('all');
+  const [editing, setEditing] = useState<Transaction | null>(null);
+  const [form, setForm] = useState<FormState>(() => blank([]));
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState<string | null>(null);
 
-  const loadAccounts = async () => {
+  async function loadAccounts() {
     if (!user) return;
-    const items = await getAccounts(user.uid);
-    setAccounts(items.filter((account) => account.active !== false));
-  };
+    setAccounts((await getAccounts(user.uid)).filter((a) => a.active !== false));
+  }
 
-  useEffect(() => {
-    loadAccounts().catch(() => setAccounts([]));
-  }, [user?.uid]);
+  useEffect(() => { loadAccounts().catch(() => setAccounts([])); }, [user?.uid]);
 
   const filtered = useMemo(() => transactions.filter((tx) => {
-    const query = search.toLowerCase();
-    const matchesType = filterType === 'all' || tx.type === filterType;
-    const matchesSearch = tx.description.toLowerCase().includes(query) || tx.category.toLowerCase().includes(query) || tx.accountName.toLowerCase().includes(query);
-    return matchesType && matchesSearch;
-  }), [transactions, filterType, search]);
+    const text = `${tx.description} ${tx.category} ${tx.accountName}`.toLowerCase();
+    return (kind === 'all' || tx.type === kind) && text.includes(query.toLowerCase());
+  }), [transactions, kind, query]);
 
-  const totals = useMemo(() => filtered.reduce((acc, tx) => {
+  const totals = useMemo(() => filtered.reduce((a, tx) => {
     const amount = toMoney(tx.amount);
-    if (isReportableFinancialTransaction(tx)) {
-      if (tx.type === 'income') acc.reportableIncome += amount;
-      if (tx.type === 'expense') acc.reportableExpense += amount;
-    } else if (inferMovementKind(tx) === 'historical_non_reportable') acc.historical += amount;
-    else if (inferMovementKind(tx).startsWith('transfer')) acc.transfers += amount;
-    else if (isProtectedTransaction(tx)) acc.protected += amount;
-    return acc;
-  }, { reportableIncome: 0, reportableExpense: 0, historical: 0, transfers: 0, protected: 0 }), [filtered]);
+    if (isReportableFinancialTransaction(tx)) tx.type === 'income' ? a.income += amount : a.expense += amount;
+    else if (inferMovementKind(tx).startsWith('transfer')) a.transfer += amount;
+    else if (inferMovementKind(tx) === 'historical_non_reportable') a.history += amount;
+    return a;
+  }, { income: 0, expense: 0, transfer: 0, history: 0 }), [filtered]);
 
-  const accountOptions = accounts.map((account) => ({ value: account.id, label: account.name }));
-  const categoryOptions = CATEGORIES.map((category) => ({ value: category, label: category }));
+  function openCreate() { setEditing(null); setForm(blank(accounts)); setError(''); setOpen(true); }
+  function openEdit(tx: Transaction) { if (tx.isReversed || tx.reversalOf) return setError('Ese movimiento ya esta reversado.'); setEditing(tx); setForm(formFromTx(tx, accounts)); setError(''); setOpen(true); }
 
-  const openCreateForm = (type?: TransactionType) => {
-    const initialType = type || (filterType === 'income' || filterType === 'expense' ? filterType : 'expense');
-    setEditingTx(null);
-    setForm(defaultForm(accounts, initialType));
-    setFormError('');
-    setFormOpen(true);
-  };
-
-  const openEditForm = (tx: Transaction) => {
-    if (isProtectedTransaction(tx)) {
-      setFormError('Este movimiento está protegido. Para corregirlo usa el flujo contable de origen o reverso específico.');
-      return;
-    }
-    setEditingTx(tx);
-    setForm(formFromTransaction(tx));
-    setFormError('');
-    setFormOpen(true);
-  };
-
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  async function save(e: FormEvent) {
+    e.preventDefault();
     if (!user) return;
-    let amount = 0;
     try {
-      amount = parseCurrencyInput(form.amount);
-    } catch (error: any) {
-      setFormError(error?.message || 'Escribe un valor válido en COP.');
-      return;
-    }
-    const account = accounts.find((item) => item.id === form.accountId);
-    if (!account) return setFormError('Selecciona una cuenta válida.');
-    if (editingTx && isProtectedTransaction(editingTx)) return setFormError('Este movimiento protegido no se puede editar manualmente.');
+      const amount = parseCurrencyInput(form.amount);
+      const date = asDate(form.date, form.time);
+      const description = form.description.trim() || (isTransfer(editing) ? 'Transferencia entre cuentas' : form.type === 'income' ? 'Ingreso manual' : 'Gasto manual');
+      if (editing && isTransfer(editing) && editing.transferId) {
+        const from = editing.transferDirection === 'in' ? editing.transferAccountId : editing.accountId;
+        const to = editing.transferDirection === 'in' ? editing.accountId : editing.transferAccountId;
+        if (!from || !to || from === to) throw new Error('No pude identificar las dos cuentas de la transferencia.');
+        await reverseTransfer(user.uid, editing.transferId, 'Correccion desde Movimientos');
+        await transferBetweenAccounts(user.uid, { fromAccountId: from, toAccountId: to, amount, description, date, allowNegativeBalance: true });
+      } else {
+        const account = accounts.find((a) => a.id === form.accountId);
+        if (!account) throw new Error('Selecciona una cuenta.');
+        if (editing) await reverseAccountingTransaction(user.uid, editing.id, 'Correccion desde Movimientos');
+        await createAccountingTransaction(user.uid, { type: form.type, amount, accountId: account.id, category: form.category, description, date, source: 'manual', rawText: description, movementKind: form.type === 'income' ? 'income' : 'expense' });
+      }
+      setOpen(false); setEditing(null); await refresh(); await loadAccounts();
+    } catch (err: any) { setError(err?.message || 'No pude guardar.'); }
+  }
 
-    setSaving(true);
-    try {
-      const description = form.description.trim() || (form.type === 'income' ? 'Ingreso manual' : 'Gasto manual');
-      if (editingTx) await reverseAccountingTransaction(user.uid, editingTx.id, 'Corrección manual con nuevo movimiento');
-      await createAccountingTransaction(user.uid, {
-        type: form.type,
-        amount,
-        accountId: account.id,
-        category: form.category || (form.type === 'income' ? 'Ingreso' : 'Otros'),
-        description: editingTx ? `Corrección: ${description}` : description,
-        date: buildDate(form.date, form.time),
-        source: 'manual',
-        rawText: editingTx ? `Corrección manual de ${editingTx.id}` : `Registro manual: ${description}`,
-        movementKind: form.type === 'income' ? 'income' : 'expense',
-      });
-      await refresh();
-      await loadAccounts();
-      setFormOpen(false);
-      setEditingTx(null);
-    } catch (error: any) {
-      setFormError(error?.message || 'No pude guardar el movimiento.');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleReverse = async (tx: Transaction) => {
+  async function removeTx(tx: Transaction) {
     if (!user) return;
-    if (isProtectedTransaction(tx) && !tx.reversalOf && !tx.isReversed) {
-      setFormError('Movimiento protegido: usa el flujo de reverso de su módulo para conservar integridad.');
-      return;
-    }
-    setBusyId(tx.id);
+    if (tx.isReversed || tx.reversalOf) return setError('Ese movimiento ya esta reversado.');
+    const ok = window.confirm(isTransfer(tx) ? 'Esto quitara la transferencia completa. Continuar?' : 'Esto quitara el efecto del movimiento. Continuar?');
+    if (!ok) return;
+    setBusy(tx.id);
     try {
-      await reverseAccountingTransaction(user.uid, tx.id, 'Reverso manual desde Movimientos');
-      await refresh();
-      await loadAccounts();
-    } catch (error: any) {
-      setFormError(error?.message || 'No pude reversar el movimiento.');
-    } finally {
-      setBusyId(null);
-    }
-  };
+      if (isTransfer(tx) && tx.transferId) await reverseTransfer(user.uid, tx.transferId, 'Quitar desde Movimientos');
+      else await reverseAccountingTransaction(user.uid, tx.id, 'Quitar desde Movimientos');
+      await refresh(); await loadAccounts();
+    } catch (err: any) { setError(err?.message || 'No pude quitar el movimiento.'); }
+    finally { setBusy(null); }
+  }
 
-  return (
-    <div className="space-y-6 pb-10">
-      <section className="lux-hero relative p-5 sm:p-7">
-        <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <p className="lux-kicker">Libro contable protegido</p>
-            <h1 className="lux-heading mt-2 text-3xl sm:text-4xl">Movimientos</h1>
-            <p className="lux-subtle mt-2 max-w-2xl text-sm">Crear usa el motor contable. Editar reversa y crea corrección. Eliminar fue reemplazado por reverso.</p>
-          </div>
-          <div className="grid gap-3 sm:min-w-[640px] sm:grid-cols-5">
-            <Metric title="Ingresos reportables" value={totals.reportableIncome} tone="green" />
-            <Metric title="Gastos reportables" value={totals.reportableExpense} tone="red" />
-            <Metric title="Históricos" value={totals.historical} tone="purple" />
-            <Metric title="Transferencias" value={totals.transfers} tone="blue" />
-            <Button className="h-full min-h-[72px] rounded-3xl" icon={<Plus className="h-4 w-4" />} onClick={() => openCreateForm()}>Manual</Button>
-          </div>
-        </div>
-      </section>
-
-      {formError && <div className="mx-1 rounded-2xl border border-amber-400/25 bg-amber-500/10 p-3 text-sm font-bold text-amber-100">{formError}</div>}
-
-      <section className="lux-card p-4 sm:p-5">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <Input placeholder="Buscar movimiento, categoría o cuenta..." value={search} onChange={(event) => setSearch(event.target.value)} icon={<Search className="h-4 w-4" />} className="w-full lg:w-96" />
-          <div className="flex flex-wrap gap-2">
-            <Button variant={filterType === 'all' ? 'primary' : 'ghost'} size="sm" onClick={() => setFilterType('all')}>Todos</Button>
-            <Button variant={filterType === 'income' ? 'success' : 'ghost'} size="sm" onClick={() => setFilterType('income')} icon={<ArrowUpRight className="h-4 w-4" />}>Ingresos</Button>
-            <Button variant={filterType === 'expense' ? 'danger' : 'ghost'} size="sm" onClick={() => setFilterType('expense')} icon={<ArrowDownLeft className="h-4 w-4" />}>Salidas</Button>
-          </div>
-        </div>
-      </section>
-
-      <section className="premium-panel overflow-hidden rounded-[1.6rem] border border-slate-700/40">
-        {loading ? <div className="flex h-64 items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-blue-400" /></div> : filtered.length === 0 ? (
-          <div className="p-5"><EmptyState asset="transactions" title="No hay movimientos" description="Registra ingresos y gastos o ajusta los filtros." /></div>
-        ) : (
-          <div className="grid gap-3 p-3">
-            {filtered.map((tx) => {
-              const protectedTx = isProtectedTransaction(tx);
-              const reversed = Boolean(tx.isReversed || tx.reversalOf);
-              return (
-                <article key={tx.id} className={clsx('rounded-3xl border p-4', reversed ? 'border-slate-700/30 bg-slate-900/20 opacity-70' : 'border-slate-700/40 bg-slate-900/35')}>
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-black text-slate-100">{tx.description}</p>
-                      <p className="mt-1 text-xs text-slate-500">{format(tx.date, 'dd MMM yyyy, HH:mm', { locale: es })} · {tx.accountName}</p>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <Badge>{tx.category}</Badge><Badge>{kindLabel(tx)}</Badge>{protectedTx && <Badge><ShieldCheck className="h-3 w-3" />Protegido</Badge>}{reversed && <Badge>Reversado</Badge>}
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between gap-3 lg:min-w-[270px] lg:justify-end">
-                      <p className={clsx('text-sm font-black', tx.type === 'income' ? 'text-green-300' : 'text-red-300')}>{tx.type === 'income' ? '+' : '-'}{formatCOP(tx.amount)}</p>
-                      <button onClick={() => openEditForm(tx)} disabled={protectedTx || reversed} className="rounded-xl p-2 text-slate-500 transition hover:bg-blue-500/10 hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-30"><Pencil className="h-4 w-4" /></button>
-                      <button onClick={() => handleReverse(tx)} disabled={reversed || busyId === tx.id} className="rounded-xl p-2 text-slate-500 transition hover:bg-amber-500/10 hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-30">{busyId === tx.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}</button>
-                      <span title="No hay borrado destructivo" className="rounded-xl p-2 text-slate-700"><Trash2 className="h-4 w-4" /></span>
-                    </div>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        )}
-      </section>
-
-      {formOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-xl">
-          <form onSubmit={handleSubmit} className="premium-panel w-full max-w-2xl rounded-[2rem] border border-slate-700/50 p-5 shadow-2xl shadow-black/40">
-            <h2 className="text-2xl font-black text-slate-100">{editingTx ? 'Corregir con reverso' : 'Nuevo movimiento reportable'}</h2>
-            <p className="mt-1 text-sm text-slate-400">La corrección reversa el original y crea un movimiento nuevo. No se edita ni borra historial.</p>
-            <div className="mt-5 grid gap-4 sm:grid-cols-2">
-              <Select label="Tipo" value={form.type} onChange={(event) => setForm((current) => ({ ...current, type: event.target.value as TransactionType, category: event.target.value === 'income' ? 'Ingreso' : 'Otros' }))} options={[{ value: 'income', label: 'Ingreso' }, { value: 'expense', label: 'Gasto' }]} />
-              <Input label="Valor" inputMode="numeric" placeholder="Ej: 45.000" value={form.amount} onChange={(event) => setForm((current) => ({ ...current, amount: event.target.value }))} />
-              <Select label="Cuenta" value={form.accountId} onChange={(event) => setForm((current) => ({ ...current, accountId: event.target.value }))} options={accountOptions.length ? accountOptions : [{ value: '', label: 'Sin cuentas' }]} />
-              <Select label="Categoría" value={form.category} onChange={(event) => setForm((current) => ({ ...current, category: event.target.value }))} options={categoryOptions} />
-              <Input label="Descripción" value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} className="sm:col-span-2" />
-              <Input label="Fecha" type="date" value={form.date} onChange={(event) => setForm((current) => ({ ...current, date: event.target.value }))} />
-              <Input label="Hora" type="time" value={form.time} onChange={(event) => setForm((current) => ({ ...current, time: event.target.value }))} />
-            </div>
-            <div className="mt-6 flex justify-end gap-3">
-              <Button type="button" variant="ghost" onClick={() => setFormOpen(false)} disabled={saving}>Cancelar</Button>
-              <Button type="submit" loading={saving}>{editingTx ? 'Reversar y crear corrección' : 'Guardar'}</Button>
-            </div>
-          </form>
-        </div>
-      )}
-    </div>
-  );
+  return <div className="space-y-6 pb-10">
+    <section className="lux-hero p-5 sm:p-7">
+      <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+        <div><p className="lux-kicker">Libro personal</p><h1 className="lux-heading mt-2 text-3xl sm:text-4xl">Movimientos</h1><p className="lux-subtle mt-2 text-sm">Lapiz para editar. Papelera para quitar. En transferencias se corrigen las dos patas.</p></div>
+        <div className="grid gap-3 sm:min-w-[640px] sm:grid-cols-5"><Metric t="Ingresos" v={totals.income} /><Metric t="Gastos" v={totals.expense} /><Metric t="Historicos" v={totals.history} /><Metric t="Transferencias" v={totals.transfer} /><button className="premium-button rounded-3xl px-4 py-3 font-black" onClick={openCreate}><Plus className="mr-2 inline h-4 w-4" />Manual</button></div>
+      </div>
+    </section>
+    {error && <div className="rounded-2xl border border-amber-400/25 bg-amber-500/10 p-3 text-sm font-bold text-amber-100">{error}</div>}
+    <section className="lux-card p-4"><div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div className="relative w-full lg:w-96"><Search className="absolute left-4 top-3.5 h-4 w-4 text-slate-500" /><input className="lux-input w-full rounded-2xl py-3 pl-11 pr-4 text-sm outline-none" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar..." /></div><div className="flex gap-2"><button className="soft-button rounded-2xl px-4 py-2 font-black" onClick={() => setKind('all')}>Todos</button><button className="soft-button rounded-2xl px-4 py-2 font-black" onClick={() => setKind('income')}>Ingresos</button><button className="soft-button rounded-2xl px-4 py-2 font-black" onClick={() => setKind('expense')}>Salidas</button></div></div></section>
+    <section className="premium-panel rounded-[1.6rem] border border-slate-700/40 p-3">{loading ? <div className="flex h-64 items-center justify-center"><Loader2 className="h-8 w-8 animate-spin" /></div> : <div className="grid gap-3">{filtered.map((tx) => { const reversed = Boolean(tx.isReversed || tx.reversalOf); return <article key={tx.id} className="rounded-3xl border border-slate-700/40 bg-slate-900/35 p-4"><div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between"><div><p className="font-black text-slate-100">{tx.description}</p><p className="text-xs text-slate-500">{tx.accountName}</p><div className="mt-2 flex gap-2"><Badge>{label(tx)}</Badge>{isProtectedTransaction(tx) && <Badge><ShieldCheck className="h-3 w-3" />Protegido</Badge>}{reversed && <Badge>Reversado</Badge>}</div></div><div className="flex items-center gap-3"><p className={tx.type === 'income' ? 'font-black text-green-300' : 'font-black text-red-300'}>{tx.type === 'income' ? '+' : '-'}{formatCOP(tx.amount)}</p><button disabled={reversed} onClick={() => openEdit(tx)} className="rounded-xl p-2 text-slate-400 hover:text-blue-300 disabled:opacity-30"><Pencil className="h-4 w-4" /></button><button disabled={reversed || busy === tx.id} onClick={() => removeTx(tx)} className="rounded-xl p-2 text-slate-400 hover:text-red-300 disabled:opacity-30">{busy === tx.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button></div></div></article>; })}</div>}</section>
+    {open && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-xl"><form onSubmit={save} className="premium-panel w-full max-w-2xl rounded-[2rem] border border-slate-700/50 p-5"><h2 className="text-2xl font-black text-slate-100">{editing ? 'Editar' : 'Nuevo'}</h2><div className="mt-5 grid gap-4 sm:grid-cols-2">{!isTransfer(editing) && <><Select label="Tipo" value={form.type} onChange={(v) => setForm({ ...form, type: v as TransactionType, category: v === 'income' ? 'Ingreso' : 'Otros' })} options={[['income','Ingreso'],['expense','Gasto']]} /><Select label="Cuenta" value={form.accountId} onChange={(v) => setForm({ ...form, accountId: v })} options={accounts.map((a) => [a.id, a.name])} /></>}<Field label="Valor" value={form.amount} onChange={(v) => setForm({ ...form, amount: v })} />{!isTransfer(editing) && <Select label="Categoria" value={form.category} onChange={(v) => setForm({ ...form, category: v })} options={CATEGORIES.map((c) => [c, c])} />}<Field label="Descripcion" value={form.description} onChange={(v) => setForm({ ...form, description: v })} /><Field label="Fecha" type="date" value={form.date} onChange={(v) => setForm({ ...form, date: v })} /><Field label="Hora" type="time" value={form.time} onChange={(v) => setForm({ ...form, time: v })} /></div><div className="mt-6 flex justify-end gap-3"><button type="button" className="soft-button rounded-2xl px-4 py-2 font-black" onClick={() => setOpen(false)}>Cancelar</button><button type="submit" className="premium-button rounded-2xl px-4 py-2 font-black">Guardar</button></div></form></div>}
+  </div>;
 }
 
-function Metric({ title, value, tone }: { title: string; value: number; tone: 'green' | 'red' | 'purple' | 'blue' }) {
-  const toneClass = { green: 'border-green-400/20 bg-green-400/10 text-green-300', red: 'border-red-400/20 bg-red-400/10 text-red-300', purple: 'border-purple-400/20 bg-purple-400/10 text-purple-300', blue: 'border-blue-400/20 bg-blue-400/10 text-blue-300' }[tone];
-  return <div className={clsx('rounded-3xl border p-4', toneClass)}><p className="text-[10px] font-black uppercase tracking-[0.16em]">{title}</p><p className="mt-1 text-lg font-black text-slate-100">{formatCOP(value)}</p></div>;
-}
-
-function Badge({ children }: { children: React.ReactNode }) {
-  return <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-600/30 bg-slate-800/50 px-3 py-1 text-[10px] font-bold text-slate-300">{children}</span>;
-}
+function Metric({ t, v }: { t: string; v: number }) { return <div className="rounded-3xl border border-blue-400/20 bg-blue-400/10 p-4"><p className="text-[10px] font-black uppercase tracking-[0.16em] text-blue-300">{t}</p><p className="mt-1 text-lg font-black text-slate-100">{formatCOP(v)}</p></div>; }
+function Badge({ children }: { children: React.ReactNode }) { return <span className="inline-flex items-center gap-1 rounded-full border border-slate-600/30 bg-slate-800/50 px-3 py-1 text-[10px] font-bold text-slate-300">{children}</span>; }
+function Field({ label, value, onChange, type = 'text' }: { label: string; value: string; onChange: (v: string) => void; type?: string }) { return <label><span className="mb-1 block text-xs font-black text-slate-400">{label}</span><input className="lux-input w-full rounded-2xl px-4 py-3 text-sm outline-none" type={type} value={value} onChange={(e) => onChange(e.target.value)} /></label>; }
+function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: string[][] }) { return <label><span className="mb-1 block text-xs font-black text-slate-400">{label}</span><select className="lux-input w-full rounded-2xl px-4 py-3 text-sm outline-none" value={value} onChange={(e) => onChange(e.target.value)}>{options.map(([v,l]) => <option key={v} value={v}>{l}</option>)}</select></label>; }
 
 export default TransactionsPage;
