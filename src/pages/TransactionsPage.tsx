@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { ArrowDownLeft, ArrowUpRight, Download, Loader2, Pencil, Plus, ReceiptText, Search, Trash2 } from 'lucide-react';
@@ -146,7 +146,7 @@ export function TransactionsPage() {
     setFormOpen(true);
   };
 
-  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!user) return;
 
