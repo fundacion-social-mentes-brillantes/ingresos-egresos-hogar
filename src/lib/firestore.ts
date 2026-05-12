@@ -16,10 +16,12 @@ import {
   Timestamp,
   serverTimestamp,
   writeBatch,
-  increment,
-  runTransaction,
 } from 'firebase/firestore';
 import { db } from './firebase';
+import { createAccountingTransaction, reverseAccountingTransaction } from './accountingOperations';
+import { transferBetweenAccountsSafe } from './transferOperations';
+import { createDebtWithMoneyMovement, registerDebtPaymentWithMoneyMovement, voidDebtWithMoneyMovements } from './debtMoney';
+import { inferMovementKind, isProtectedTransaction, toMoney } from './accounting';
 import type {
   Transaction,
   Account,
@@ -29,6 +31,7 @@ import type {
   Debt,
   DeletedTransaction,
   ActionLog,
+  MovementKind,
 } from '../types';
 import type { BatchImportPreview } from './batchImportParser';
 
@@ -48,6 +51,9 @@ const settRef = (uid: string) => doc(db, 'users', uid, 'settings', 'app');
 
 type FirestoreObject = Record<string, unknown>;
 
+type LegacyTransactionInput = Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>;
+type LegacyDebtInput = Omit<Debt, 'id' | 'createdAt' | 'updatedAt'> & { linkedAccountId?: string; linkedAccountName?: string };
+
 function isPlainObject(value: unknown): value is FirestoreObject {
   if (!value || typeof value !== 'object') return false;
   const prototype = Object.getPrototypeOf(value);
@@ -59,18 +65,9 @@ function cleanFirestoreValue(value: unknown): unknown {
   if (value === null) return null;
   if (value instanceof Date) return value;
   if (value instanceof Timestamp) return value;
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => cleanFirestoreValue(item))
-      .filter((item) => item !== undefined);
-  }
+  if (Array.isArray(value)) return value.map((item) => cleanFirestoreValue(item)).filter((item) => item !== undefined);
   if (!isPlainObject(value)) return value;
-
-  return Object.fromEntries(
-    Object.entries(value)
-      .map(([key, item]) => [key, cleanFirestoreValue(item)] as const)
-      .filter(([, item]) => item !== undefined)
-  );
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cleanFirestoreValue(item)] as const).filter(([, item]) => item !== undefined));
 }
 
 function cleanUndefinedFields<T extends FirestoreObject>(data: T): Partial<T> {
@@ -79,9 +76,7 @@ function cleanUndefinedFields<T extends FirestoreObject>(data: T): Partial<T> {
 
 function toDate(value: unknown): Date {
   if (value instanceof Date) return value;
-  if (value && typeof value === 'object' && 'toDate' in value && typeof (value as { toDate: () => Date }).toDate === 'function') {
-    return (value as { toDate: () => Date }).toDate();
-  }
+  if (value && typeof value === 'object' && 'toDate' in value && typeof (value as { toDate: () => Date }).toDate === 'function') return (value as { toDate: () => Date }).toDate();
   if (typeof value === 'string' || typeof value === 'number') {
     const parsed = new Date(value);
     if (!Number.isNaN(parsed.getTime())) return parsed;
@@ -95,60 +90,44 @@ function toOptionalDate(value: unknown): Date | null {
 }
 
 function normalizeComparableName(value: string): string {
-  return String(value || '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
 }
 
 function normalizeTransaction(id: string, data: Record<string, any>): Transaction {
-  return {
-    id,
-    ...data,
-    amount: Number(data.amount || 0),
-    date: toDate(data.date),
-    createdAt: toDate(data.createdAt),
-    updatedAt: toDate(data.updatedAt),
-  } as Transaction;
+  return { id, ...data, amount: toMoney(data.amount), date: toDate(data.date), createdAt: toDate(data.createdAt), updatedAt: toDate(data.updatedAt) } as Transaction;
 }
 
 function normalizeDeletedTransaction(id: string, data: Record<string, any>): DeletedTransaction {
   const originalId = String(data.originalId || id);
-  return {
-    ...normalizeTransaction(originalId, data),
-    deletedId: id,
-    originalId,
-    deletedAt: toDate(data.deletedAt),
-    recoverable: data.recoverable ?? true,
-  } as DeletedTransaction;
+  return { ...normalizeTransaction(originalId, data), deletedId: id, originalId, deletedAt: toDate(data.deletedAt), recoverable: data.recoverable ?? true } as DeletedTransaction;
 }
 
 function normalizeDebt(id: string, data: Record<string, any>): Debt {
-  const amountOriginal = Number(data.amountOriginal || 0);
-  const amountPaid = Number(data.amountPaid || 0);
+  const amountOriginal = toMoney(data.amountOriginal || 0);
+  const amountPaid = toMoney(data.amountPaid || 0);
   const status = data.status || (amountPaid >= amountOriginal ? 'paid' : amountPaid > 0 ? 'partial' : 'open');
-
-  return {
-    id,
-    ...data,
-    amountOriginal,
-    amountPaid,
-    status,
-    dueDate: toOptionalDate(data.dueDate),
-    closedAt: toOptionalDate(data.closedAt),
-    createdAt: toDate(data.createdAt),
-    updatedAt: toDate(data.updatedAt),
-  } as Debt;
+  return { id, ...data, amountOriginal, amountPaid, status, dueDate: toOptionalDate(data.dueDate), closedAt: toOptionalDate(data.closedAt), createdAt: toDate(data.createdAt), updatedAt: toDate(data.updatedAt) } as Debt;
 }
 
 function normalizeActionLog(id: string, data: Record<string, any>): ActionLog {
-  return {
-    id,
-    ...data,
-    createdAt: toDate(data.createdAt),
-  } as ActionLog;
+  return { id, ...data, createdAt: toDate(data.createdAt) } as ActionLog;
+}
+
+async function getAccountById(uid: string, id: string): Promise<Account> {
+  const snap = await getDoc(accRef(uid, id));
+  if (!snap.exists()) throw new Error('La cuenta no existe.');
+  const data = snap.data();
+  return { id: snap.id, ...data, currentBalance: toMoney(data.currentBalance), initialBalance: toMoney(data.initialBalance), createdAt: toDate(data.createdAt) } as Account;
+}
+
+function safeMovementKind(data: Partial<Transaction>): MovementKind {
+  const kind = inferMovementKind(data);
+  if (kind === 'legacy') return data.type === 'income' ? 'income' : 'expense';
+  return kind;
+}
+
+function hasFinancialDebtPatch(data: Partial<Debt>): boolean {
+  return ['amountOriginal', 'amountPaid', 'status', 'closedAt', 'direction'].some((key) => Object.prototype.hasOwnProperty.call(data, key));
 }
 
 // -- User profile ------------------------------------------------------------
@@ -160,16 +139,7 @@ export async function getUserProfile(uid: string): Promise<UserProfile | null> {
 }
 
 export async function createUserProfile(uid: string, data: Omit<UserProfile, 'uid' | 'createdAt'>) {
-  await setDoc(
-    userRef(uid),
-    cleanUndefinedFields({
-      ...data,
-      defaultCurrency: 'COP',
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    }),
-    { merge: true }
-  );
+  await setDoc(userRef(uid), cleanUndefinedFields({ ...data, defaultCurrency: 'COP', createdAt: serverTimestamp(), updatedAt: serverTimestamp() }), { merge: true });
 }
 
 export async function updateUserProfile(uid: string, data: Partial<Omit<UserProfile, 'uid' | 'createdAt'>>) {
@@ -179,24 +149,13 @@ export async function updateUserProfile(uid: string, data: Partial<Omit<UserProf
 // -- Accounts ----------------------------------------------------------------
 export async function getAccounts(uid: string): Promise<Account[]> {
   const snap = await getDocs(query(accCol(uid), orderBy('createdAt', 'asc')));
-  return snap.docs.map((d) => ({
-    id: d.id,
-    ...d.data(),
-    currentBalance: Number(d.data().currentBalance || 0),
-    initialBalance: Number(d.data().initialBalance || 0),
-    createdAt: toDate(d.data().createdAt),
-  })) as Account[];
+  return snap.docs.map((d) => ({ id: d.id, ...d.data(), currentBalance: toMoney(d.data().currentBalance), calculatedBalance: toMoney(d.data().calculatedBalance), realBalance: d.data().realBalance, initialBalance: toMoney(d.data().initialBalance), createdAt: toDate(d.data().createdAt) })) as Account[];
 }
 
 export async function addAccount(uid: string, data: Omit<Account, 'id' | 'createdAt'>) {
-  return addDoc(accCol(uid), cleanUndefinedFields({
-    ...data,
-    initialBalance: Number(data.initialBalance || 0),
-    currentBalance: Number(data.currentBalance || 0),
-    active: data.active ?? true,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  }));
+  const initialBalance = toMoney(data.initialBalance || data.currentBalance || 0);
+  const currentBalance = toMoney(data.currentBalance ?? initialBalance);
+  return addDoc(accCol(uid), cleanUndefinedFields({ ...data, initialBalance, currentBalance, calculatedBalance: currentBalance, active: data.active ?? true, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }));
 }
 
 export async function updateAccount(uid: string, id: string, data: Partial<Account>) {
@@ -205,45 +164,25 @@ export async function updateAccount(uid: string, id: string, data: Partial<Accou
 
 export async function createBatchImportFromPreview(uid: string, preview: BatchImportPreview) {
   const accountName = preview.accountName.trim();
-  const duplicate = (await getAccounts(uid)).find(
-    (account) => normalizeComparableName(account.name) === normalizeComparableName(accountName)
-  );
-
+  const duplicate = (await getAccounts(uid)).find((account) => normalizeComparableName(account.name) === normalizeComparableName(accountName));
   const batch = writeBatch(db);
   const targetAccountRef = duplicate ? accRef(uid, duplicate.id) : doc(accCol(uid));
   const batchImportId = targetAccountRef.id;
   const importedAt = new Date();
+  const initialBalance = toMoney(preview.totalValue || 0);
+  const currentBalance = toMoney(preview.expectedPendingBalance || 0);
 
-  if (duplicate?.batchImportId) {
-    throw new Error(`La cuenta ${duplicate.name} ya parece tener una importacion por lote. No se guardo nada para evitar duplicados.`);
-  }
+  if (duplicate?.batchImportId) throw new Error(`La cuenta ${duplicate.name} ya parece tener una importacion por lote. No se guardo nada para evitar duplicados.`);
 
-  if (duplicate) {
-    batch.update(targetAccountRef, cleanUndefinedFields({
-      initialBalance: Number(preview.totalValue || 0),
-      currentBalance: Number(preview.expectedPendingBalance || 0),
-      active: true,
-      batchImportId,
-      updatedAt: serverTimestamp(),
-    }));
-  } else {
-    batch.set(targetAccountRef, cleanUndefinedFields({
-      name: accountName,
-      type: 'other' as const,
-      initialBalance: Number(preview.totalValue || 0),
-      currentBalance: Number(preview.expectedPendingBalance || 0),
-      active: true,
-      batchImportId,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    }));
-  }
+  const accountPayload = { initialBalance, currentBalance, calculatedBalance: currentBalance, active: true, batchImportId, updatedAt: serverTimestamp() };
+  if (duplicate) batch.update(targetAccountRef, cleanUndefinedFields(accountPayload));
+  else batch.set(targetAccountRef, cleanUndefinedFields({ name: accountName, type: 'other' as const, ...accountPayload, createdAt: serverTimestamp() }));
 
   preview.movements.forEach((movement, index) => {
     const newTransactionRef = doc(txCol(uid));
     batch.set(newTransactionRef, cleanUndefinedFields({
       type: 'expense' as const,
-      amount: Number(movement.amount || 0),
+      amount: toMoney(movement.amount || 0),
       currency: 'COP' as const,
       category: 'Abono / Descuento',
       accountId: targetAccountRef.id,
@@ -253,6 +192,10 @@ export async function createBatchImportFromPreview(uid: string, preview: BatchIm
       rawText: preview.rawText,
       source: 'manual' as const,
       confidence: 1,
+      movementKind: 'historical_non_reportable' as const,
+      affectsCash: true,
+      affectsReport: false,
+      affectsDebt: false,
       excludeFromReports: true,
       batchImportId,
       importRow: index + 1,
@@ -262,121 +205,11 @@ export async function createBatchImportFromPreview(uid: string, preview: BatchIm
   });
 
   await batch.commit();
-
-  return {
-    accountId: targetAccountRef.id,
-    accountName: duplicate?.name || accountName,
-    count: preview.movements.length,
-  };
+  return { accountId: targetAccountRef.id, accountName: duplicate?.name || accountName, count: preview.movements.length };
 }
 
-export async function transferBetweenAccounts(
-  uid: string,
-  params: {
-    fromAccountId: string;
-    toAccountId: string;
-    amount: number;
-    description?: string;
-    date?: Date;
-    allowNegativeBalance?: boolean;
-  }
-) {
-  const { fromAccountId, toAccountId, amount, description, date, allowNegativeBalance } = params;
-
-  if (fromAccountId === toAccountId) {
-    throw new Error('La cuenta origen y destino deben ser diferentes.');
-  }
-
-  if (!amount || amount <= 0) {
-    throw new Error('Escribe un valor mayor a cero.');
-  }
-
-  const fromRef = accRef(uid, fromAccountId);
-  const toRef = accRef(uid, toAccountId);
-
-  await runTransaction(db, async (transaction) => {
-    const fromDoc = await transaction.get(fromRef);
-    const toDoc = await transaction.get(toRef);
-
-    if (!fromDoc.exists()) {
-      throw new Error('La cuenta de origen no existe.');
-    }
-    if (!toDoc.exists()) {
-      throw new Error('La cuenta de destino no existe.');
-    }
-
-    const fromData = fromDoc.data() as Account;
-    const toData = toDoc.data() as Account;
-
-    const fromCurrentBalance = Number(fromData.currentBalance || 0);
-    const toCurrentBalance = Number(toData.currentBalance || 0);
-
-    if (!allowNegativeBalance && fromCurrentBalance < amount) {
-      throw new Error('Saldo insuficiente en la cuenta de origen.');
-    }
-
-    const transferId = doc(txCol(uid)).id; // Generate a unique ID for the transfer
-    const timestamp = serverTimestamp();
-    const txDate = date ? Timestamp.fromDate(date) : timestamp;
-
-    const txOutRef = doc(txCol(uid));
-    const txInRef = doc(txCol(uid));
-
-    // Update balances
-    transaction.update(fromRef, cleanUndefinedFields({
-      currentBalance: fromCurrentBalance - amount,
-      updatedAt: timestamp,
-    }));
-
-    transaction.update(toRef, cleanUndefinedFields({
-      currentBalance: toCurrentBalance + amount,
-      updatedAt: timestamp,
-    }));
-
-    // Create Out transaction
-    transaction.set(txOutRef, cleanUndefinedFields({
-      type: 'expense' as const,
-      amount,
-      currency: 'COP' as const,
-      category: 'Transferencia entre cuentas',
-      accountId: fromAccountId,
-      accountName: fromData.name,
-      description: description || `Transferencia a ${toData.name}`,
-      rawText: `Transferencia de ${fromData.name} a ${toData.name}`,
-      source: 'manual' as const,
-      confidence: 1,
-      transferId,
-      transferDirection: 'out' as const,
-      transferAccountId: toAccountId,
-      transferAccountName: toData.name,
-      excludeFromReports: true,
-      date: txDate,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    }));
-
-    // Create In transaction
-    transaction.set(txInRef, cleanUndefinedFields({
-      type: 'income' as const,
-      amount,
-      currency: 'COP' as const,
-      category: 'Transferencia entre cuentas',
-      accountId: toAccountId,
-      accountName: toData.name,
-      description: description || `Transferencia desde ${fromData.name}`,
-      rawText: `Transferencia de ${fromData.name} a ${toData.name}`,
-      source: 'manual' as const,
-      confidence: 1,
-      transferId,
-      transferDirection: 'in' as const,
-      transferAccountId: fromAccountId,
-      transferAccountName: fromData.name,
-      excludeFromReports: true,
-      date: txDate,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    }));
-  });
+export async function transferBetweenAccounts(uid: string, params: { fromAccountId: string; toAccountId: string; amount: number; description?: string; date?: Date; allowNegativeBalance?: boolean; }) {
+  return transferBetweenAccountsSafe(uid, params);
 }
 
 // -- Transactions ------------------------------------------------------------
@@ -385,104 +218,58 @@ export async function getTransactions(uid: string, limitCount = 100): Promise<Tr
   return snap.docs.map((d) => normalizeTransaction(d.id, d.data()));
 }
 
-export async function getTransactionsByRange(
-  uid: string,
-  startDate: Date,
-  endDate: Date
-): Promise<Transaction[]> {
-  const snap = await getDocs(
-    query(
-      txCol(uid),
-      where('date', '>=', Timestamp.fromDate(startDate)),
-      where('date', '<=', Timestamp.fromDate(endDate)),
-      orderBy('date', 'desc')
-    )
-  );
+export async function getTransactionsByRange(uid: string, startDate: Date, endDate: Date): Promise<Transaction[]> {
+  const snap = await getDocs(query(txCol(uid), where('date', '>=', Timestamp.fromDate(startDate)), where('date', '<=', Timestamp.fromDate(endDate)), orderBy('date', 'desc')));
   return snap.docs.map((d) => normalizeTransaction(d.id, d.data()));
 }
 
-export async function addTransaction(uid: string, data: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>) {
-  const batch = writeBatch(db);
-  const newTxRef = doc(txCol(uid));
-  const amount = Number(data.amount || 0);
-
-  batch.set(newTxRef, cleanUndefinedFields({
-    ...data,
-    amount,
-    currency: data.currency || 'COP',
+export async function addTransaction(uid: string, data: LegacyTransactionInput) {
+  if (!data.accountId) throw new Error('Para registrar un movimiento se necesita una cuenta real.');
+  if (data.transferId || data.debtId || data.debtMovementKind) throw new Error('Movimiento protegido: usa el flujo seguro de transferencias o deudas.');
+  return createAccountingTransaction(uid, {
+    type: data.type,
+    amount: data.amount,
+    accountId: data.accountId,
     category: data.category || (data.type === 'income' ? 'Ingreso' : 'Otros'),
-    accountName: data.accountName || 'Efectivo',
-    description: data.description || 'Movimiento registrado desde el chat',
-    date: Timestamp.fromDate(data.date instanceof Date ? data.date : new Date(data.date)),
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  }));
-
-  if (data.accountId) {
-    const balanceChange = data.type === 'income' ? amount : -amount;
-    batch.update(accRef(uid, data.accountId), cleanUndefinedFields({
-      currentBalance: increment(balanceChange),
-      updatedAt: serverTimestamp(),
-    }));
-  }
-
-  await batch.commit();
-  return newTxRef;
+    description: data.description || 'Movimiento registrado',
+    date: data.date instanceof Date ? data.date : toDate(data.date),
+    source: data.source || 'manual',
+    rawText: data.rawText || data.description || '',
+    movementKind: safeMovementKind(data),
+    excludeFromReports: data.excludeFromReports,
+  });
 }
 
 export async function updateTransaction(uid: string, id: string, data: Partial<Transaction>) {
   const current = await getDoc(txRef(uid, id));
-  if (!current.exists()) return;
-
+  if (!current.exists()) return null;
   const previous = normalizeTransaction(current.id, current.data());
+  if (isProtectedTransaction(previous)) throw new Error('Movimiento protegido: corrige desde su flujo especifico para conservar la contabilidad.');
   const nextType = data.type || previous.type;
-  const nextAmount = Number(data.amount ?? previous.amount);
+  const nextAmount = data.amount ?? previous.amount;
   const nextAccountId = data.accountId || previous.accountId;
-  const payload: Record<string, unknown> = cleanUndefinedFields({ ...data, amount: nextAmount, updatedAt: serverTimestamp() });
-  if (data.date) payload.date = Timestamp.fromDate(data.date instanceof Date ? data.date : new Date(data.date));
-
-  const batch = writeBatch(db);
-  batch.update(txRef(uid, id), cleanUndefinedFields(payload));
-
-  const oldEffect = previous.type === 'income' ? previous.amount : -previous.amount;
-  const newEffect = nextType === 'income' ? nextAmount : -nextAmount;
-  if (previous.accountId && nextAccountId && previous.accountId === nextAccountId) {
-    const delta = newEffect - oldEffect;
-    if (delta !== 0) {
-      batch.update(accRef(uid, nextAccountId), cleanUndefinedFields({ currentBalance: increment(delta), updatedAt: serverTimestamp() }));
-    }
-  } else {
-    if (previous.accountId) batch.update(accRef(uid, previous.accountId), cleanUndefinedFields({ currentBalance: increment(-oldEffect), updatedAt: serverTimestamp() }));
-    if (nextAccountId) batch.update(accRef(uid, nextAccountId), cleanUndefinedFields({ currentBalance: increment(newEffect), updatedAt: serverTimestamp() }));
-  }
-
-  await batch.commit();
+  if (!nextAccountId) throw new Error('La correccion necesita una cuenta real.');
+  await reverseAccountingTransaction(uid, id, 'Correccion legacy redirigida al motor contable');
+  return createAccountingTransaction(uid, {
+    type: nextType,
+    amount: nextAmount,
+    accountId: nextAccountId,
+    category: data.category || previous.category,
+    description: data.description || `Correccion de ${previous.description}`,
+    date: data.date instanceof Date ? data.date : previous.date,
+    source: data.source || previous.source || 'manual',
+    rawText: data.rawText || previous.rawText || previous.description,
+    movementKind: nextType === 'income' ? 'income' : 'expense',
+    excludeFromReports: data.excludeFromReports ?? previous.excludeFromReports,
+  });
 }
 
 export async function deleteTransaction(uid: string, id: string) {
   const current = await getDoc(txRef(uid, id));
   if (!current.exists()) return null;
-
-  const tx = current.data() as Partial<Transaction>;
-  const batch = writeBatch(db);
-  const deletedRef = doc(deletedTxCol(uid));
-  batch.set(deletedRef, cleanUndefinedFields({
-    ...tx,
-    originalId: id,
-    deletedAt: serverTimestamp(),
-    recoverable: true,
-  }));
-  batch.delete(txRef(uid, id));
-
-  if (tx.accountId && typeof tx.amount === 'number' && tx.type) {
-    const reverseBalance = tx.type === 'income' ? -tx.amount : tx.amount;
-    batch.update(accRef(uid, tx.accountId), cleanUndefinedFields({
-      currentBalance: increment(reverseBalance),
-      updatedAt: serverTimestamp(),
-    }));
-  }
-
-  await batch.commit();
+  const tx = normalizeTransaction(current.id, current.data());
+  const deletedRef = await addDoc(deletedTxCol(uid), cleanUndefinedFields({ ...tx, originalId: id, deletedAt: serverTimestamp(), recoverable: true, safeDeletion: true }));
+  await reverseAccountingTransaction(uid, id, 'Papelera legacy redirigida a reverso contable');
   return deletedRef.id;
 }
 
@@ -494,33 +281,24 @@ export async function getDeletedTransactions(uid: string, limitCount = 25): Prom
 export async function restoreDeletedTransaction(uid: string, deletedId: string): Promise<Transaction | null> {
   const deletedSnap = await getDoc(deletedTxRef(uid, deletedId));
   if (!deletedSnap.exists()) return null;
-
   const data = deletedSnap.data() as Record<string, any>;
-  const originalId = String(data.originalId || deletedSnap.id);
-  const restoredData = { ...data };
-  delete restoredData.originalId;
-  delete restoredData.deletedAt;
-  delete restoredData.recoverable;
-
-  const restored = normalizeTransaction(originalId, restoredData);
-  const batch = writeBatch(db);
-  batch.set(txRef(uid, originalId), cleanUndefinedFields({
-    ...restoredData,
-    restoredAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  }));
-  batch.delete(deletedTxRef(uid, deletedSnap.id));
-
-  if (restored.accountId && restored.amount && restored.type) {
-    const balanceChange = restored.type === 'income' ? restored.amount : -restored.amount;
-    batch.update(accRef(uid, restored.accountId), cleanUndefinedFields({
-      currentBalance: increment(balanceChange),
-      updatedAt: serverTimestamp(),
-    }));
-  }
-
-  await batch.commit();
-  return restored;
+  const restored = normalizeDeletedTransaction(deletedSnap.id, data);
+  if (!restored.accountId) throw new Error('No se puede restaurar sin cuenta asociada.');
+  const created = await createAccountingTransaction(uid, {
+    type: restored.type,
+    amount: restored.amount,
+    accountId: restored.accountId,
+    category: restored.category,
+    description: `Restaurado: ${restored.description}`,
+    date: restored.date,
+    source: restored.source || 'manual',
+    rawText: restored.rawText || restored.description,
+    movementKind: restored.type === 'income' ? 'income' : 'expense',
+    excludeFromReports: restored.excludeFromReports,
+  });
+  await deleteDoc(deletedTxRef(uid, deletedId));
+  const snap = await getDoc(created);
+  return snap.exists() ? normalizeTransaction(snap.id, snap.data()) : restored;
 }
 
 export async function restoreLastDeletedTransaction(uid: string): Promise<Transaction | null> {
@@ -536,55 +314,51 @@ export async function getDebts(uid: string, limitCount = 100): Promise<Debt[]> {
   return snap.docs.map((d) => normalizeDebt(d.id, d.data()));
 }
 
-export async function addDebt(uid: string, data: Omit<Debt, 'id' | 'createdAt' | 'updatedAt'>) {
-  const amountOriginal = Number(data.amountOriginal || 0);
-  const amountPaid = Number(data.amountPaid || 0);
-  return addDoc(debtCol(uid), cleanUndefinedFields({
-    ...data,
-    amountOriginal,
-    amountPaid,
+export async function addDebt(uid: string, data: LegacyDebtInput) {
+  const accountId = data.linkedAccountId || (data as any).accountId;
+  if (!accountId) throw new Error('Para crear una deuda segura debes indicar la cuenta real que se mueve.');
+  const account = await getAccountById(uid, accountId);
+  return createDebtWithMoneyMovement(uid, {
+    direction: data.direction,
+    personName: data.personName,
+    amountOriginal: toMoney(data.amountOriginal),
+    amountPaid: toMoney(data.amountPaid || 0),
     currency: data.currency || 'COP',
-    status: data.status || (amountPaid >= amountOriginal ? 'paid' : amountPaid > 0 ? 'partial' : 'open'),
-    dueDate: data.dueDate ? Timestamp.fromDate(data.dueDate) : null,
-    closedAt: data.closedAt ? Timestamp.fromDate(data.closedAt) : null,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  }));
+    description: data.description,
+    notes: data.notes || null,
+    dueDate: data.dueDate || null,
+    status: data.status,
+    source: data.source || 'manual',
+    confidence: data.confidence,
+    closedAt: data.closedAt || null,
+  }, account);
 }
 
 export async function updateDebt(uid: string, id: string, data: Partial<Debt>) {
+  if (hasFinancialDebtPatch(data)) throw new Error('Cambio financiero de deuda bloqueado: usa abono, pago total o anulacion segura.');
   const payload: Record<string, unknown> = cleanUndefinedFields({ ...data, updatedAt: serverTimestamp() });
   if (data.dueDate !== undefined) payload.dueDate = data.dueDate ? Timestamp.fromDate(data.dueDate) : null;
-  if (data.closedAt !== undefined) payload.closedAt = data.closedAt ? Timestamp.fromDate(data.closedAt) : null;
   return updateDoc(debtRef(uid, id), cleanUndefinedFields(payload));
 }
 
 export async function deleteDebt(uid: string, id: string) {
-  return deleteDoc(debtRef(uid, id));
+  return voidDebtWithMoneyMovements(uid, id, 'Papelera legacy redirigida a anulacion segura');
 }
 
 export async function registerDebtPayment(uid: string, id: string, amount: number) {
   const current = await getDoc(debtRef(uid, id));
-  if (!current.exists()) return;
-
+  if (!current.exists()) return null;
   const debt = normalizeDebt(current.id, current.data());
-  const newPaid = Math.min(debt.amountOriginal, debt.amountPaid + Number(amount || 0));
-  const newStatus = newPaid >= debt.amountOriginal ? 'paid' : newPaid > 0 ? 'partial' : 'open';
-  return updateDebt(uid, id, {
-    amountPaid: newPaid,
-    status: newStatus,
-    closedAt: newStatus === 'paid' ? new Date() : null,
-  });
+  const accountId = (debt as any).lastPaymentAccountId || (debt as any).linkedAccountId;
+  if (!accountId) throw new Error('Para abonar una deuda se necesita la cuenta real que se mueve.');
+  const account = await getAccountById(uid, accountId);
+  return registerDebtPaymentWithMoneyMovement(uid, id, amount, account);
 }
 
 // -- Chat messages -----------------------------------------------------------
 export async function getChatMessages(uid: string, limitCount = 50): Promise<ChatMessage[]> {
   const snap = await getDocs(query(chatCol(uid), orderBy('createdAt', 'asc'), limit(limitCount)));
-  return snap.docs.map((d) => ({
-    id: d.id,
-    ...d.data(),
-    createdAt: toDate(d.data().createdAt),
-  })) as ChatMessage[];
+  return snap.docs.map((d) => ({ id: d.id, ...d.data(), createdAt: toDate(d.data().createdAt) })) as ChatMessage[];
 }
 
 export async function addChatMessage(uid: string, data: Omit<ChatMessage, 'id' | 'createdAt'>) {
@@ -596,8 +370,6 @@ export async function addActionLog(uid: string, data: Omit<ActionLog, 'id' | 'cr
   try {
     return await addDoc(actionLogCol(uid), cleanUndefinedFields({ ...data, createdAt: serverTimestamp() }));
   } catch (error) {
-    // Action logs are useful for audit/history, but they must never block the bot.
-    // This protects production when Firestore rules for actionLogs are not deployed yet.
     console.debug('Action log skipped:', error);
     return null;
   }
@@ -611,9 +383,7 @@ export async function getActionLogs(uid: string, limitCount = 50): Promise<Actio
 // -- Settings ----------------------------------------------------------------
 export async function getSettings(uid: string): Promise<AppSettings> {
   const snap = await getDoc(settRef(uid));
-  if (!snap.exists()) {
-    return { autoCreateTransactions: true, askConfirmationWhenAmbiguous: true, monthlyStartDay: 1 };
-  }
+  if (!snap.exists()) return { autoCreateTransactions: true, askConfirmationWhenAmbiguous: true, monthlyStartDay: 1 };
   return snap.data() as AppSettings;
 }
 
