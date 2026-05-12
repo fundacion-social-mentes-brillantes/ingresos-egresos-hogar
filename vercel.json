@@ -1,6 +1,10 @@
 {
   "rewrites": [
     {
+      "source": "/api/deepseek-chat",
+      "destination": "/api/deepseek-chat-safe"
+    },
+    {
       "source": "/(.*)",
       "destination": "/"
     }
