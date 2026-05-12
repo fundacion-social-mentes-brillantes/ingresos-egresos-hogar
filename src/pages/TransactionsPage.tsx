@@ -371,9 +371,21 @@ export function TransactionsPage() {
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="rounded-full border border-slate-600/30 bg-slate-800/50 px-3 py-1 text-xs font-bold text-slate-300">
-                          {tx.category}
-                        </span>
+                        <div className="flex flex-col gap-1.5 items-start">
+                          <span className="rounded-full border border-slate-600/30 bg-slate-800/50 px-3 py-1 text-[10px] font-bold text-slate-300">
+                            {tx.category}
+                          </span>
+                          {tx.transferId && (
+                            <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-3 py-1 text-[10px] font-bold text-blue-300">
+                              Transferencia
+                            </span>
+                          )}
+                          {tx.excludeFromReports && (
+                            <span className="rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1 text-[10px] font-bold text-purple-300">
+                              Histórico / no reportable
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <AccountBrandMark name={tx.accountName} size="sm" showLabel />
@@ -422,10 +434,22 @@ export function TransactionsPage() {
                     </p>
                   </div>
                   <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-                    <span className="inline-flex items-center gap-2 rounded-full border border-slate-600/30 bg-slate-800/50 px-3 py-1 text-xs font-bold text-slate-300">
-                      <ReceiptText className="h-3.5 w-3.5" />
-                      {tx.category}
-                    </span>
+                    <div className="flex flex-wrap gap-2">
+                      <span className="inline-flex items-center gap-2 rounded-full border border-slate-600/30 bg-slate-800/50 px-3 py-1 text-[10px] font-bold text-slate-300">
+                        <ReceiptText className="h-3.5 w-3.5" />
+                        {tx.category}
+                      </span>
+                      {tx.transferId && (
+                        <span className="inline-flex items-center gap-2 rounded-full border border-blue-500/30 bg-blue-500/10 px-3 py-1 text-[10px] font-bold text-blue-300">
+                          Transferencia
+                        </span>
+                      )}
+                      {tx.excludeFromReports && (
+                        <span className="inline-flex items-center gap-2 rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1 text-[10px] font-bold text-purple-300">
+                          Histórico / no reportable
+                        </span>
+                      )}
+                    </div>
                     <div className="flex gap-2">
                       <button
                         onClick={() => openEditForm(tx)}

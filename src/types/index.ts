@@ -68,6 +68,10 @@ export interface Transaction {
   batchImportId?: string;
   importRow?: number;
   excludeFromReports?: boolean;
+  transferId?: string;
+  transferDirection?: 'in' | 'out';
+  transferAccountId?: string;
+  transferAccountName?: string;
 }
 
 export interface DeletedTransaction extends Transaction {

@@ -17,6 +17,7 @@ import {
   serverTimestamp,
   writeBatch,
   increment,
+  runTransaction,
 } from 'firebase/firestore';
 import { db } from './firebase';
 import type {
@@ -267,6 +268,115 @@ export async function createBatchImportFromPreview(uid: string, preview: BatchIm
     accountName: duplicate?.name || accountName,
     count: preview.movements.length,
   };
+}
+
+export async function transferBetweenAccounts(
+  uid: string,
+  params: {
+    fromAccountId: string;
+    toAccountId: string;
+    amount: number;
+    description?: string;
+    date?: Date;
+    allowNegativeBalance?: boolean;
+  }
+) {
+  const { fromAccountId, toAccountId, amount, description, date, allowNegativeBalance } = params;
+
+  if (fromAccountId === toAccountId) {
+    throw new Error('La cuenta origen y destino deben ser diferentes.');
+  }
+
+  if (!amount || amount <= 0) {
+    throw new Error('Escribe un valor mayor a cero.');
+  }
+
+  const fromRef = accRef(uid, fromAccountId);
+  const toRef = accRef(uid, toAccountId);
+
+  await runTransaction(db, async (transaction) => {
+    const fromDoc = await transaction.get(fromRef);
+    const toDoc = await transaction.get(toRef);
+
+    if (!fromDoc.exists()) {
+      throw new Error('La cuenta de origen no existe.');
+    }
+    if (!toDoc.exists()) {
+      throw new Error('La cuenta de destino no existe.');
+    }
+
+    const fromData = fromDoc.data() as Account;
+    const toData = toDoc.data() as Account;
+
+    const fromCurrentBalance = Number(fromData.currentBalance || 0);
+    const toCurrentBalance = Number(toData.currentBalance || 0);
+
+    if (!allowNegativeBalance && fromCurrentBalance < amount) {
+      throw new Error('Saldo insuficiente en la cuenta de origen.');
+    }
+
+    const transferId = doc(txCol(uid)).id; // Generate a unique ID for the transfer
+    const timestamp = serverTimestamp();
+    const txDate = date ? Timestamp.fromDate(date) : timestamp;
+
+    const txOutRef = doc(txCol(uid));
+    const txInRef = doc(txCol(uid));
+
+    // Update balances
+    transaction.update(fromRef, cleanUndefinedFields({
+      currentBalance: fromCurrentBalance - amount,
+      updatedAt: timestamp,
+    }));
+
+    transaction.update(toRef, cleanUndefinedFields({
+      currentBalance: toCurrentBalance + amount,
+      updatedAt: timestamp,
+    }));
+
+    // Create Out transaction
+    transaction.set(txOutRef, cleanUndefinedFields({
+      type: 'expense' as const,
+      amount,
+      currency: 'COP' as const,
+      category: 'Transferencia entre cuentas',
+      accountId: fromAccountId,
+      accountName: fromData.name,
+      description: description || `Transferencia a ${toData.name}`,
+      rawText: `Transferencia de ${fromData.name} a ${toData.name}`,
+      source: 'manual' as const,
+      confidence: 1,
+      transferId,
+      transferDirection: 'out' as const,
+      transferAccountId: toAccountId,
+      transferAccountName: toData.name,
+      excludeFromReports: true,
+      date: txDate,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }));
+
+    // Create In transaction
+    transaction.set(txInRef, cleanUndefinedFields({
+      type: 'income' as const,
+      amount,
+      currency: 'COP' as const,
+      category: 'Transferencia entre cuentas',
+      accountId: toAccountId,
+      accountName: toData.name,
+      description: description || `Transferencia desde ${fromData.name}`,
+      rawText: `Transferencia de ${fromData.name} a ${toData.name}`,
+      source: 'manual' as const,
+      confidence: 1,
+      transferId,
+      transferDirection: 'in' as const,
+      transferAccountId: fromAccountId,
+      transferAccountName: fromData.name,
+      excludeFromReports: true,
+      date: txDate,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }));
+  });
 }
 
 // -- Transactions ------------------------------------------------------------
