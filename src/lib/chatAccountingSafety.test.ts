@@ -37,13 +37,13 @@ describe('chat accounting safety', () => {
 
   it('blocks debt movement deletion from chat as a normal movement', () => {
     const decision = classifyChatAccountingTarget(tx({ debtId: 'debt-1', debtMovementKind: 'loan_principal_out' }), 'delete_transaction');
-    expect(decision.mode).toBe('blocked');
+    if (decision.mode !== 'blocked') throw new Error('Expected blocked decision');
     expect(decision.reason).toBe(CHAT_DEBT_BLOCK_MESSAGE);
   });
 
   it('blocks imported or historical movement from chat', () => {
     const decision = classifyChatAccountingTarget(tx({ batchImportId: 'batch-1', movementKind: 'historical_non_reportable', excludeFromReports: true }), 'delete_transaction');
-    expect(decision.mode).toBe('blocked');
+    if (decision.mode !== 'blocked') throw new Error('Expected blocked decision');
     expect(decision.reason).toMatch(/hist[oó]rico|importado/i);
   });
 
