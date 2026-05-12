@@ -7,6 +7,7 @@ import { useDebts } from '../hooks/useDebts';
 import type { Account, Debt, DebtDirection } from '../types';
 import { formatCOP } from '../types';
 import { EmptyState } from '../components/visual/EmptyState';
+import { parseCurrencyInput, toMoney } from '../lib/accounting';
 
 const emptyForm = {
   direction: 'receivable' as DebtDirection,
@@ -25,7 +26,7 @@ function parseDateInput(value: string): Date | null {
 }
 
 function remaining(debt: Debt): number {
-  return Math.max(0, Number(debt.amountOriginal || 0) - Number(debt.amountPaid || 0));
+  return Math.max(0, toMoney(debt.amountOriginal) - toMoney(debt.amountPaid));
 }
 
 function statusLabel(debt: Debt): string {
@@ -42,8 +43,12 @@ function statusClass(debt: Debt): string {
 
 function directionText(direction: DebtDirection) {
   return direction === 'receivable'
-    ? { tab: 'Me deben', account: 'Cuenta de donde sale la plata', help: 'Si prestas plata, se descuenta de esta cuenta.', payAccount: 'Cuenta donde entra el abono' }
-    : { tab: 'Yo debo', account: 'Cuenta donde entra la plata', help: 'Si pides prestado, se suma a esta cuenta.', payAccount: 'Cuenta de donde sale el pago' };
+    ? { tab: 'Me deben', account: 'Cuenta de donde sale la plata', help: 'Si prestas plata, se descuenta de esta cuenta y queda como cuenta por cobrar, no como gasto normal.', payAccount: 'Cuenta donde entra el abono' }
+    : { tab: 'Yo debo', account: 'Cuenta donde entra la plata', help: 'Si pides prestado, se suma a esta cuenta y queda como cuenta por pagar, no como ingreso normal.', payAccount: 'Cuenta de donde sale el pago' };
+}
+
+function parseDebtAmount(value: string): number {
+  return parseCurrencyInput(value);
 }
 
 export function DebtsPageWithAccounts() {
@@ -82,8 +87,15 @@ export function DebtsPageWithAccounts() {
   const handleCreate = async () => {
     if (!user) return;
     setError(null);
-    const amountOriginal = Number(form.amountOriginal || 0);
-    const amountPaid = Math.max(0, Math.min(amountOriginal, Number(form.amountPaid || 0)));
+
+    let amountOriginal = 0;
+    let amountPaid = 0;
+    try {
+      amountOriginal = parseDebtAmount(form.amountOriginal);
+      amountPaid = form.amountPaid ? Math.max(0, Math.min(amountOriginal, parseDebtAmount(form.amountPaid))) : 0;
+    } catch (err: any) {
+      return setError(err?.message || 'Escribe un valor valido.');
+    }
 
     if (!form.personName.trim()) return setError('Escribe quien debe o a quien le debes.');
     if (!amountOriginal || amountOriginal <= 0) return setError('Escribe un valor valido.');
@@ -117,7 +129,13 @@ export function DebtsPageWithAccounts() {
   const handlePayment = async (debt: Debt, amountOverride?: number) => {
     if (!user) return;
     const account = accounts.find((item) => item.id === paymentAccountId[debt.id]);
-    const amount = amountOverride ?? Number(paymentAmount[debt.id] || 0);
+    let amount = amountOverride ?? 0;
+
+    try {
+      if (amountOverride === undefined) amount = parseDebtAmount(paymentAmount[debt.id] || '');
+    } catch (err: any) {
+      return setError(err?.message || 'Escribe cuanto abonaron o cuanto pagaste.');
+    }
 
     if (!account) return setError(directionText(debt.direction).payAccount + '.');
     if (!amount || amount <= 0) return setError('Escribe cuanto abonaron o cuanto pagaste.');
@@ -147,7 +165,7 @@ export function DebtsPageWithAccounts() {
           <div>
             <p className="lux-kicker">Control de obligaciones</p>
             <h1 className="lux-heading mt-2 text-3xl sm:text-4xl">Deudas y plata prestada</h1>
-            <p className="lux-subtle mt-2 max-w-2xl text-sm">Ahora cada prestamo mueve una cuenta real: Nequi, Daviplata, Banco, Efectivo u otra cuenta creada.</p>
+            <p className="lux-subtle mt-2 max-w-2xl text-sm">Cada prestamo mueve una cuenta real y queda separado de ingresos/gastos normales para no duplicar la contabilidad.</p>
           </div>
           <div className="grid gap-3 sm:grid-cols-3 lg:min-w-[520px]">
             <div className="rounded-3xl border border-green-500/20 bg-green-500/10 p-4"><p className="text-xs font-black uppercase tracking-[0.16em] text-green-300">Te deben</p><p className="mt-1 text-xl font-black text-slate-100">{formatCOP(summary.receivable)}</p></div>
@@ -165,7 +183,7 @@ export function DebtsPageWithAccounts() {
               {(['receivable', 'payable'] as DebtDirection[]).map((direction) => <button key={direction} onClick={() => { setForm((prev) => ({ ...prev, direction })); setCreateAccountId(''); }} className={`rounded-xl px-3 py-2 text-sm font-black transition ${form.direction === direction ? (direction === 'receivable' ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300') : 'text-slate-500 hover:text-slate-300'}`}>{directionText(direction).tab}</button>)}
             </div>
             <input className="lux-input w-full rounded-2xl px-4 py-3 text-sm outline-none" placeholder="Persona o entidad" value={form.personName} onChange={(event) => setForm((prev) => ({ ...prev, personName: event.target.value }))} />
-            <input className="lux-input w-full rounded-2xl px-4 py-3 text-sm outline-none" placeholder="Valor total" type="number" value={form.amountOriginal} onChange={(event) => setForm((prev) => ({ ...prev, amountOriginal: event.target.value }))} />
+            <input className="lux-input w-full rounded-2xl px-4 py-3 text-sm outline-none" placeholder="Valor total, ej: 599.000" type="text" value={form.amountOriginal} onChange={(event) => setForm((prev) => ({ ...prev, amountOriginal: event.target.value }))} />
             <select className="lux-input w-full rounded-2xl px-4 py-3 text-sm outline-none" value={createAccountId} onChange={(event) => setCreateAccountId(event.target.value)}>
               <option value="">{copy.account}</option>
               {accounts.map((account) => <option key={account.id} value={account.id}>{account.name} - {formatCOP(account.currentBalance)}</option>)}
@@ -187,7 +205,7 @@ export function DebtsPageWithAccounts() {
             const debtCopy = directionText(debt.direction);
             return <article key={debt.id} className="rounded-3xl border border-slate-700/50 bg-slate-900/40 p-4 shadow-lg shadow-black/10">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full border px-3 py-1 text-xs font-black ${debt.direction === 'receivable' ? 'border-green-400/25 bg-green-400/10 text-green-300' : 'border-red-400/25 bg-red-400/10 text-red-300'}`}>{debt.direction === 'receivable' ? 'Te deben' : 'Tu debes'}</span><span className={`rounded-full border px-3 py-1 text-xs font-black ${statusClass(debt)}`}>{statusLabel(debt)}</span></div><h3 className="mt-3 truncate text-xl font-black text-slate-100">{debt.personName}</h3><p className="text-sm text-slate-400">{debt.description}</p>{(debt as any).linkedAccountName && <p className="mt-2 text-xs font-bold text-slate-500">Cuenta inicial: {(debt as any).linkedAccountName}</p>}{debt.dueDate && <p className="mt-3 flex items-center gap-2 text-xs font-bold text-amber-300"><CalendarClock className="h-4 w-4" />Fecha pactada: {debt.dueDate.toLocaleDateString('es-CO')}</p>}</div><div className="min-w-[190px] text-left lg:text-right"><p className="text-xs font-black uppercase tracking-[0.16em] text-slate-500">Saldo pendiente</p><p className={`mt-1 text-3xl font-black ${debt.direction === 'receivable' ? 'text-green-300' : 'text-red-300'}`}>{formatCOP(rest)}</p><p className="mt-1 text-xs text-slate-500">Total: {formatCOP(debt.amountOriginal)} · Abonado: {formatCOP(debt.amountPaid)}</p><div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-800/70"><div className="h-full rounded-full bg-gradient-to-r from-blue-400 to-green-300" style={{ width: `${progress}%` }} /></div></div></div>
-              {debt.status !== 'paid' && <div className="mt-4 grid gap-2 sm:grid-cols-[1fr_1fr_auto_auto]"><select className="lux-input min-w-0 rounded-2xl px-4 py-2.5 text-sm outline-none" value={paymentAccountId[debt.id] || ''} onChange={(event) => setPaymentAccountId((prev) => ({ ...prev, [debt.id]: event.target.value }))}><option value="">{debtCopy.payAccount}</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name} - {formatCOP(account.currentBalance)}</option>)}</select><input className="lux-input min-w-0 rounded-2xl px-4 py-2.5 text-sm outline-none" placeholder="Abono o pago" type="number" value={paymentAmount[debt.id] || ''} onChange={(event) => setPaymentAmount((prev) => ({ ...prev, [debt.id]: event.target.value }))} /><button onClick={() => handlePayment(debt)} disabled={payingId === debt.id} className="premium-button inline-flex items-center justify-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-black transition disabled:opacity-50">{payingId === debt.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <HandCoins className="h-4 w-4" />}Abonar</button><button onClick={() => handlePayment(debt, rest)} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-green-400/25 bg-green-500/15 px-4 py-2.5 text-sm font-black text-green-200 transition hover:bg-green-500/20"><CheckCircle2 className="h-4 w-4" />Pagada</button></div>}
+              {debt.status !== 'paid' && <div className="mt-4 grid gap-2 sm:grid-cols-[1fr_1fr_auto_auto]"><select className="lux-input min-w-0 rounded-2xl px-4 py-2.5 text-sm outline-none" value={paymentAccountId[debt.id] || ''} onChange={(event) => setPaymentAccountId((prev) => ({ ...prev, [debt.id]: event.target.value }))}><option value="">{debtCopy.payAccount}</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name} - {formatCOP(account.currentBalance)}</option>)}</select><input className="lux-input min-w-0 rounded-2xl px-4 py-2.5 text-sm outline-none" placeholder="Abono o pago" type="text" value={paymentAmount[debt.id] || ''} onChange={(event) => setPaymentAmount((prev) => ({ ...prev, [debt.id]: event.target.value }))} /><button onClick={() => handlePayment(debt)} disabled={payingId === debt.id} className="premium-button inline-flex items-center justify-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-black transition disabled:opacity-50">{payingId === debt.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <HandCoins className="h-4 w-4" />}Abonar</button><button onClick={() => handlePayment(debt, rest)} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-green-400/25 bg-green-500/15 px-4 py-2.5 text-sm font-black text-green-200 transition hover:bg-green-500/20"><CheckCircle2 className="h-4 w-4" />Pagada</button></div>}
               <div className="mt-3 flex justify-end"><button onClick={() => handleDelete(debt)} className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-black text-slate-500 transition hover:bg-red-500/10 hover:text-red-300"><Trash2 className="h-4 w-4" />Eliminar</button></div>
             </article>;
           })}</div>}
