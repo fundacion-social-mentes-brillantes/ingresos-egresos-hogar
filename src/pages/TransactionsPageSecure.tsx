@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { Loader2, Pencil, Plus, RotateCcw, Search, ShieldCheck, Trash2 } from 'lucide-react';
+import { Loader2, Pencil, Plus, Search, ShieldCheck, Trash2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTransactions } from '../hooks/useTransactions';
-import { getAccounts, transferBetweenAccounts } from '../lib/firestore';
+import { getAccounts } from '../lib/firestore';
+import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { createAccountingTransaction, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
 import { inferMovementKind, isProtectedTransaction, isReportableFinancialTransaction, parseCurrencyInput, toMoney } from '../lib/accounting';
 import { CATEGORIES, formatCOP } from '../types';
@@ -81,7 +82,7 @@ export function TransactionsPage() {
         const to = editing.transferDirection === 'in' ? editing.accountId : editing.transferAccountId;
         if (!from || !to || from === to) throw new Error('No pude identificar las dos cuentas de la transferencia.');
         await reverseTransfer(user.uid, editing.transferId, 'Correccion desde Movimientos');
-        await transferBetweenAccounts(user.uid, { fromAccountId: from, toAccountId: to, amount, description, date, allowNegativeBalance: true });
+        await transferBetweenAccountsSafe(user.uid, { fromAccountId: from, toAccountId: to, amount, description, date, allowNegativeBalance: true });
       } else {
         const account = accounts.find((a) => a.id === form.accountId);
         if (!account) throw new Error('Selecciona una cuenta.');

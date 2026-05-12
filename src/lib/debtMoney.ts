@@ -1,6 +1,7 @@
-import { collection, doc, getDoc, increment, serverTimestamp, Timestamp, writeBatch } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, increment, query, serverTimestamp, Timestamp, where, writeBatch } from 'firebase/firestore';
 import { db } from './firebase';
 import type { Account, Debt, DebtDirection } from '../types';
+import { affectsCash, toMoney } from './accounting';
 
 type NewDebtInput = {
   direction: DebtDirection;
@@ -19,7 +20,9 @@ type NewDebtInput = {
 
 function debtCol(uid: string) { return collection(db, 'users', uid, 'debts'); }
 function txCol(uid: string) { return collection(db, 'users', uid, 'transactions'); }
+function auditCol(uid: string) { return collection(db, 'users', uid, 'accountingAudit'); }
 function debtRef(uid: string, id: string) { return doc(db, 'users', uid, 'debts', id); }
+function txRef(uid: string, id: string) { return doc(db, 'users', uid, 'transactions', id); }
 function accRef(uid: string, id: string) { return doc(db, 'users', uid, 'accounts', id); }
 
 function toDate(value: any): Date | null {
@@ -31,8 +34,8 @@ function toDate(value: any): Date | null {
 }
 
 function normalizeDebt(id: string, data: any): Debt {
-  const amountOriginal = Number(data.amountOriginal || 0);
-  const amountPaid = Number(data.amountPaid || 0);
+  const amountOriginal = toMoney(data.amountOriginal || 0);
+  const amountPaid = toMoney(data.amountPaid || 0);
   return {
     id,
     ...data,
@@ -46,28 +49,38 @@ function normalizeDebt(id: string, data: any): Debt {
 }
 
 function remaining(debt: Debt): number {
-  return Math.max(0, Number(debt.amountOriginal || 0) - Number(debt.amountPaid || 0));
+  return Math.max(0, toMoney(debt.amountOriginal) - toMoney(debt.amountPaid));
+}
+
+function cashDelta(tx: any): number {
+  if (!affectsCash(tx)) return 0;
+  return tx.type === 'income' ? toMoney(tx.amount) : -toMoney(tx.amount);
 }
 
 export async function createDebtWithMoneyMovement(uid: string, data: NewDebtInput, account: Account) {
   if (!account?.id) throw new Error('Elige la cuenta para mover la plata.');
-  const amountOriginal = Number(data.amountOriginal || 0);
+  const amountOriginal = toMoney(data.amountOriginal || 0);
   if (!amountOriginal || amountOriginal <= 0) throw new Error('El valor debe ser mayor que cero.');
 
   const isReceivable = data.direction === 'receivable';
   const debt = doc(debtCol(uid));
   const tx = doc(txCol(uid));
   const batch = writeBatch(db);
-  const status = data.status || ((data.amountPaid || 0) >= amountOriginal ? 'paid' : (data.amountPaid || 0) > 0 ? 'partial' : 'open');
+  const paid = toMoney(data.amountPaid || 0);
+  const status = data.status || (paid >= amountOriginal ? 'paid' : paid > 0 ? 'partial' : 'open');
   const description = data.description || (isReceivable ? 'Plata prestada' : 'Deuda por pagar');
+  const type = isReceivable ? 'expense' : 'income';
+  const movementKind = isReceivable ? 'loan_given' : 'loan_received';
+  const delta = isReceivable ? -amountOriginal : amountOriginal;
 
   batch.set(debt, {
     ...data,
     amountOriginal,
-    amountPaid: Number(data.amountPaid || 0),
+    amountPaid: paid,
     status,
     dueDate: data.dueDate ? Timestamp.fromDate(data.dueDate) : null,
     closedAt: status === 'paid' ? serverTimestamp() : null,
+    debtKind: 'loan',
     linkedAccountId: account.id,
     linkedAccountName: account.name,
     createdAt: serverTimestamp(),
@@ -75,7 +88,7 @@ export async function createDebtWithMoneyMovement(uid: string, data: NewDebtInpu
   });
 
   batch.set(tx, {
-    type: isReceivable ? 'expense' : 'income',
+    type,
     amount: amountOriginal,
     currency: 'COP',
     category: isReceivable ? 'Prestamo entregado' : 'Prestamo recibido',
@@ -88,15 +101,21 @@ export async function createDebtWithMoneyMovement(uid: string, data: NewDebtInpu
     confidence: data.confidence ?? 1,
     debtId: debt.id,
     debtMovementKind: isReceivable ? 'loan_principal_out' : 'loan_principal_in',
+    movementKind,
+    affectsCash: true,
+    affectsReport: false,
+    affectsDebt: true,
     excludeFromReports: true,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
 
   batch.update(accRef(uid, account.id), {
-    currentBalance: increment(isReceivable ? -amountOriginal : amountOriginal),
+    currentBalance: increment(delta),
+    calculatedBalance: increment(delta),
     updatedAt: serverTimestamp(),
   });
+  batch.set(doc(auditCol(uid)), { action: 'create_debt_with_money_movement', debtId: debt.id, transactionId: tx.id, amount: amountOriginal, delta, createdAt: serverTimestamp() });
 
   await batch.commit();
   return debt;
@@ -107,7 +126,7 @@ export async function registerDebtPaymentWithMoneyMovement(uid: string, debtId: 
   const snap = await getDoc(debtRef(uid, debtId));
   if (!snap.exists()) throw new Error('No encontre la deuda.');
   const debt = normalizeDebt(snap.id, snap.data());
-  const applied = Math.min(remaining(debt), Number(amount || 0));
+  const applied = Math.min(remaining(debt), toMoney(amount || 0));
   if (!applied || applied <= 0) throw new Error('El abono debe ser mayor que cero.');
 
   const isReceivable = debt.direction === 'receivable';
@@ -116,6 +135,9 @@ export async function registerDebtPaymentWithMoneyMovement(uid: string, debtId: 
   const tx = doc(txCol(uid));
   const batch = writeBatch(db);
   const description = isReceivable ? `Abono recibido de ${debt.personName}: ${debt.description}` : `Pago de deuda a ${debt.personName}: ${debt.description}`;
+  const type = isReceivable ? 'income' : 'expense';
+  const movementKind = isReceivable ? 'loan_payment_received' : 'debt_payment_made';
+  const delta = isReceivable ? applied : -applied;
 
   batch.update(debtRef(uid, debt.id), {
     amountPaid: newPaid,
@@ -127,7 +149,7 @@ export async function registerDebtPaymentWithMoneyMovement(uid: string, debtId: 
   });
 
   batch.set(tx, {
-    type: isReceivable ? 'income' : 'expense',
+    type,
     amount: applied,
     currency: 'COP',
     category: isReceivable ? 'Pago deuda recibida' : 'Pago deuda pagada',
@@ -140,16 +162,72 @@ export async function registerDebtPaymentWithMoneyMovement(uid: string, debtId: 
     confidence: 1,
     debtId: debt.id,
     debtMovementKind: isReceivable ? 'debt_payment_in' : 'debt_payment_out',
+    movementKind,
+    affectsCash: true,
+    affectsReport: false,
+    affectsDebt: true,
     excludeFromReports: true,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
 
   batch.update(accRef(uid, account.id), {
-    currentBalance: increment(isReceivable ? applied : -applied),
+    currentBalance: increment(delta),
+    calculatedBalance: increment(delta),
     updatedAt: serverTimestamp(),
   });
+  batch.set(doc(auditCol(uid)), { action: 'register_debt_payment_with_money_movement', debtId: debt.id, transactionId: tx.id, amount: applied, delta, createdAt: serverTimestamp() });
 
   await batch.commit();
   return tx;
+}
+
+export async function voidDebtWithMoneyMovements(uid: string, debtId: string, reason = 'Anulacion de deuda') {
+  const snap = await getDoc(debtRef(uid, debtId));
+  if (!snap.exists()) throw new Error('No encontre la deuda.');
+  const debt = normalizeDebt(snap.id, snap.data());
+  if (debt.isReversed) throw new Error('Esta deuda ya fue anulada.');
+
+  const txSnap = await getDocs(query(txCol(uid), where('debtId', '==', debtId)));
+  const batch = writeBatch(db);
+
+  txSnap.docs.forEach((item) => {
+    const tx = { id: item.id, ...item.data() } as any;
+    if (tx.isReversed || tx.reversalOf) return;
+    const amount = toMoney(tx.amount || 0);
+    const reverseType = tx.type === 'income' ? 'expense' : 'income';
+    const delta = -cashDelta(tx);
+    const reverse = doc(txCol(uid));
+    batch.update(txRef(uid, tx.id), { isReversed: true, reversedAt: serverTimestamp(), reversalReason: reason, updatedAt: serverTimestamp() });
+    batch.set(reverse, {
+      type: reverseType,
+      amount,
+      currency: 'COP',
+      category: 'Reverso deuda',
+      accountId: tx.accountId,
+      accountName: tx.accountName,
+      description: `Reverso de deuda: ${tx.description}`,
+      date: serverTimestamp(),
+      rawText: reason,
+      source: 'manual',
+      confidence: 1,
+      debtId,
+      movementKind: 'reconciliation_adjustment',
+      affectsCash: affectsCash(tx),
+      affectsReport: false,
+      affectsDebt: true,
+      excludeFromReports: true,
+      reversalOf: tx.id,
+      reversalReason: reason,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    if (tx.accountId && delta !== 0) {
+      batch.update(accRef(uid, tx.accountId), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
+    }
+  });
+
+  batch.update(debtRef(uid, debtId), { isReversed: true, status: 'paid', amountPaid: toMoney(debt.amountOriginal), reversalReason: reason, closedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+  batch.set(doc(auditCol(uid)), { action: 'void_debt_with_money_movements', debtId, reason, createdAt: serverTimestamp() });
+  await batch.commit();
 }

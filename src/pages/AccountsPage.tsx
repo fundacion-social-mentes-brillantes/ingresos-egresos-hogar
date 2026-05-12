@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTransactions } from '../hooks/useTransactions';
-import { transferBetweenAccounts } from '../lib/firestore';
+import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { confirmRealBalance } from '../lib/accountingOperations';
 import { buildAccountingLedger, parseCurrencyInput } from '../lib/accounting';
 import { formatCOP } from '../types';
@@ -55,7 +55,7 @@ export function AccountsPage() {
     try {
       const amount = parseCurrencyInput(transferAmount);
       if (transferFrom === transferTo) throw new Error('Las cuentas de origen y destino deben ser distintas.');
-      await transferBetweenAccounts(user.uid, { fromAccountId: transferFrom, toAccountId: transferTo, amount, description: transferDescription });
+      await transferBetweenAccountsSafe(user.uid, { fromAccountId: transferFrom, toAccountId: transferTo, amount, description: transferDescription });
       setShowTransferForm(false);
       setTransferFrom('');
       setTransferTo('');
