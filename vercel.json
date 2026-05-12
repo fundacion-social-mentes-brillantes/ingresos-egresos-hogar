@@ -1,4 +1,11 @@
 {
+  "redirects": [
+    {
+      "source": "/api/deepseek-chat",
+      "destination": "/api/deepseek-chat-safe",
+      "statusCode": 307
+    }
+  ],
   "rewrites": [
     {
       "source": "/(.*)",
