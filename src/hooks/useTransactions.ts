@@ -29,11 +29,23 @@ function normalizeTransaction(id: string, data: Record<string, any>): Transactio
   } as Transaction;
 }
 
+function normalizeAccount(id: string, data: Record<string, any>): Account {
+  return {
+    id,
+    ...data,
+    currentBalance: Number(data.currentBalance || 0),
+    initialBalance: Number(data.initialBalance || 0),
+    active: data.active ?? true,
+    createdAt: toDate(data.createdAt),
+  } as Account;
+}
+
 export function useTransactions() {
   const { user } = useAuth();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [transactionsLoading, setTransactionsLoading] = useState(true);
+  const [accountsLoading, setAccountsLoading] = useState(true);
 
   const refreshAccounts = useCallback(async () => {
     if (!user) return;
@@ -43,11 +55,11 @@ export function useTransactions() {
 
   const refresh = useCallback(async () => {
     if (!user) return;
-    setLoading(true);
+    setAccountsLoading(true);
     try {
       await refreshAccounts();
     } finally {
-      setLoading(false);
+      setAccountsLoading(false);
     }
   }, [user, refreshAccounts]);
 
@@ -55,14 +67,13 @@ export function useTransactions() {
     if (!user) {
       setTransactions([]);
       setAccounts([]);
-      setLoading(false);
+      setTransactionsLoading(false);
+      setAccountsLoading(false);
       return;
     }
 
-    setLoading(true);
-    refreshAccounts().catch((error) => {
-      console.error('Error loading accounts:', error);
-    });
+    setTransactionsLoading(true);
+    setAccountsLoading(true);
 
     const transactionsQuery = query(
       collection(db, `users/${user.uid}/transactions`),
@@ -70,22 +81,42 @@ export function useTransactions() {
       limit(200)
     );
 
-    const unsubscribe = onSnapshot(
+    const accountsQuery = query(
+      collection(db, `users/${user.uid}/accounts`),
+      orderBy('createdAt', 'asc')
+    );
+
+    const unsubscribeTransactions = onSnapshot(
       transactionsQuery,
       (snapshot) => {
         setTransactions(snapshot.docs.map((doc) => normalizeTransaction(doc.id, doc.data())));
-        setLoading(false);
+        setTransactionsLoading(false);
       },
       (error) => {
         console.error('Realtime transactions listener failed:', error);
-        setLoading(false);
+        setTransactionsLoading(false);
       }
     );
 
-    return () => unsubscribe();
-  }, [user, refreshAccounts]);
+    const unsubscribeAccounts = onSnapshot(
+      accountsQuery,
+      (snapshot) => {
+        setAccounts(snapshot.docs.map((doc) => normalizeAccount(doc.id, doc.data())));
+        setAccountsLoading(false);
+      },
+      (error) => {
+        console.error('Realtime accounts listener failed:', error);
+        setAccountsLoading(false);
+      }
+    );
 
-  return { transactions, accounts, loading, refresh };
+    return () => {
+      unsubscribeTransactions();
+      unsubscribeAccounts();
+    };
+  }, [user]);
+
+  return { transactions, accounts, loading: transactionsLoading || accountsLoading, refresh };
 }
 
 export function useFinancialSummary(transactions: Transaction[]): FinancialSummary {
