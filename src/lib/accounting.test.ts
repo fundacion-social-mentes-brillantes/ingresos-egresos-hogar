@@ -8,6 +8,7 @@ import {
   isReportableFinancialTransaction,
   parseCurrencyInput,
 } from './accounting';
+import { buildFinanceWorkbook, buildMonthlyReport } from './reporting';
 
 function account(overrides: Partial<Account> = {}): Account {
   return {
@@ -19,6 +20,7 @@ function account(overrides: Partial<Account> = {}): Account {
     realBalance: overrides.realBalance,
     active: overrides.active ?? true,
     createdAt: overrides.createdAt || new Date('2026-01-01T12:00:00'),
+    ...overrides,
   };
 }
 
@@ -32,7 +34,7 @@ function tx(overrides: Partial<Transaction> = {}): Transaction {
     accountId: overrides.accountId || 'bank',
     accountName: overrides.accountName || 'Banco',
     description: overrides.description || 'Movimiento',
-    date: overrides.date || new Date('2026-05-01T12:00:00'),
+    date: overrides.date || new Date(),
     rawText: overrides.rawText || '',
     source: overrides.source || 'manual',
     confidence: overrides.confidence ?? 1,
@@ -96,7 +98,6 @@ describe('ledger accounting', () => {
         tx({ id: 'g2', amount: 20_000, category: 'Transporte' }),
       ]
     );
-
     expect(ledger.byAccount.bank.gastosReportablesOPresentes).toBe(45_000);
     expect(ledger.byAccount.bank.gastosHistoricosNoReportables).toBe(599_000);
     expect(ledger.byAccount.bank.salidasFisicasTotales).toBe(644_000);
@@ -139,6 +140,22 @@ describe('ledger accounting', () => {
     expect(ledger.global.deudasPorCobrarPendientes).toBe(50_000);
   });
 
+  it('handles received loan and debt payment without reporting them as normal income or expense', () => {
+    const ledger = buildAccountingLedger(
+      [account({ initialBalance: 0, currentBalance: 60_000 })],
+      [
+        tx({ id: 'loan-in', type: 'income', amount: 100_000, debtId: 'p1', debtMovementKind: 'loan_principal_in', category: 'Prestamo recibido', excludeFromReports: true }),
+        tx({ id: 'payment-out', type: 'expense', amount: 40_000, debtId: 'p1', debtMovementKind: 'debt_payment_out', category: 'Pago deuda pagada', excludeFromReports: true }),
+      ],
+      [debt({ id: 'p1', direction: 'payable', amountOriginal: 100_000, amountPaid: 40_000 })]
+    );
+    expect(ledger.byAccount.bank.prestamosRecibidos).toBe(100_000);
+    expect(ledger.byAccount.bank.abonosADeudasPorPagar).toBe(40_000);
+    expect(ledger.global.deudasPorPagarPendientes).toBe(60_000);
+    expect(ledger.global.ingresosReportables).toBe(0);
+    expect(ledger.global.gastosReportablesOPresentes).toBe(0);
+  });
+
   it('records payable expense creation without reducing cash, then payment without duplicating reportable expense', () => {
     const ledger = buildAccountingLedger(
       [account({ initialBalance: 200_000, currentBalance: 150_000 })],
@@ -152,6 +169,42 @@ describe('ledger accounting', () => {
     expect(ledger.byAccount.bank.gastosPendientesPagados).toBe(50_000);
     expect(ledger.byAccount.bank.salidasFisicasTotales).toBe(50_000);
   });
+
+  it('models safe edit as reverse original plus corrected movement', () => {
+    const transactions = [
+      tx({ id: 'original', type: 'expense', amount: 20_000, isReversed: true }),
+      tx({ id: 'reverse', type: 'income', amount: 20_000, reversalOf: 'original', excludeFromReports: true, movementKind: 'reconciliation_adjustment' }),
+      tx({ id: 'corrected', type: 'expense', amount: 15_000, category: 'Corregido' }),
+    ];
+    const ledger = buildAccountingLedger([account({ initialBalance: 100_000 })], transactions);
+    expect(ledger.byAccount.bank.salidasFisicasTotales).toBe(15_000);
+    expect(ledger.byAccount.bank.gastosReportablesOPresentes).toBe(15_000);
+  });
+
+  it('models paper bin delete as reversal that removes cash/reporting effect', () => {
+    const transactions = [
+      tx({ id: 'deleted', type: 'income', amount: 30_000, isReversed: true }),
+      tx({ id: 'reverse-delete', type: 'expense', amount: 30_000, reversalOf: 'deleted', excludeFromReports: true, movementKind: 'reconciliation_adjustment' }),
+    ];
+    const ledger = buildAccountingLedger([account({ initialBalance: 100_000 })], transactions);
+    expect(ledger.byAccount.bank.ingresosReportables).toBe(0);
+    expect(ledger.byAccount.bank.ingresosFisicos).toBe(0);
+    expect(ledger.byAccount.bank.salidasFisicasTotales).toBe(0);
+  });
+
+  it('models debt voiding as reversing all associated debt money movements', () => {
+    const ledger = buildAccountingLedger(
+      [account({ initialBalance: 100_000 })],
+      [
+        tx({ id: 'loan', amount: 100_000, debtId: 'd1', debtMovementKind: 'loan_principal_out', excludeFromReports: true, isReversed: true }),
+        tx({ id: 'loan-reverse', type: 'income', amount: 100_000, debtId: 'd1', reversalOf: 'loan', excludeFromReports: true, movementKind: 'reconciliation_adjustment' }),
+      ],
+      [debt({ id: 'd1', direction: 'receivable', amountOriginal: 100_000, amountPaid: 100_000, status: 'paid', isReversed: true })]
+    );
+    expect(ledger.global.deudasPorCobrarPendientes).toBe(0);
+    expect(ledger.byAccount.bank.prestamosOtorgados).toBe(0);
+    expect(ledger.byAccount.bank.saldoFisicoCalculado).toBe(100_000);
+  });
 });
 
 describe('period reporting', () => {
@@ -159,15 +212,46 @@ describe('period reporting', () => {
     const start = new Date('2026-05-01T00:00:00');
     const end = new Date('2026-05-31T23:59:59');
     const report = buildFinancialSummaryForPeriod([
-      tx({ id: 'income', type: 'income', amount: 100_000 }),
-      tx({ id: 'expense', type: 'expense', amount: 40_000 }),
-      tx({ id: 'transfer', type: 'expense', amount: 30_000, transferId: 'tr1', transferDirection: 'out', category: 'Transferencia entre cuentas' }),
-      tx({ id: 'loan', type: 'expense', amount: 20_000, debtId: 'd1', debtMovementKind: 'loan_principal_out', excludeFromReports: true }),
-      tx({ id: 'historical', type: 'expense', amount: 10_000, excludeFromReports: true }),
+      tx({ id: 'income', type: 'income', amount: 100_000, date: new Date('2026-05-02') }),
+      tx({ id: 'expense', type: 'expense', amount: 40_000, date: new Date('2026-05-03') }),
+      tx({ id: 'transfer', type: 'expense', amount: 30_000, transferId: 'tr1', transferDirection: 'out', category: 'Transferencia entre cuentas', date: new Date('2026-05-04') }),
+      tx({ id: 'loan', type: 'expense', amount: 20_000, debtId: 'd1', debtMovementKind: 'loan_principal_out', excludeFromReports: true, date: new Date('2026-05-05') }),
+      tx({ id: 'historical', type: 'expense', amount: 10_000, excludeFromReports: true, date: new Date('2026-05-06') }),
     ], start, end, 'custom');
 
     expect(report.totalIncome).toBe(100_000);
     expect(report.totalExpenses).toBe(40_000);
     expect(report.balance).toBe(60_000);
+  });
+
+  it('monthly report excludes transfers, debts, reversals and historical movements', () => {
+    const now = new Date();
+    const transactions = [
+      tx({ id: 'income', type: 'income', amount: 100_000, date: now }),
+      tx({ id: 'expense', type: 'expense', amount: 40_000, date: now }),
+      tx({ id: 'transfer', amount: 30_000, transferId: 'tr1', transferDirection: 'out', category: 'Transferencia entre cuentas', date: now }),
+      tx({ id: 'debt', amount: 20_000, debtId: 'd1', debtMovementKind: 'loan_principal_out', excludeFromReports: true, date: now }),
+      tx({ id: 'reversed', amount: 10_000, isReversed: true, date: now }),
+    ];
+    const report = buildMonthlyReport(transactions, []);
+    expect(report.totalIncome).toBe(100_000);
+    expect(report.totalExpenses).toBe(40_000);
+    expect(report.balance).toBe(60_000);
+  });
+
+  it('Excel workbook matches accounting engine totals in cover sheet', () => {
+    const accounts = [account({ initialBalance: 100_000 })];
+    const transactions = [
+      tx({ id: 'income', type: 'income', amount: 50_000 }),
+      tx({ id: 'expense', type: 'expense', amount: 20_000 }),
+      tx({ id: 'transfer', amount: 10_000, transferId: 'tr1', transferDirection: 'out', category: 'Transferencia entre cuentas' }),
+      tx({ id: 'transfer-in', type: 'income', amount: 10_000, transferId: 'tr1', transferDirection: 'in', category: 'Transferencia entre cuentas' }),
+    ];
+    const ledger = buildAccountingLedger(accounts, transactions, []);
+    const workbook = buildFinanceWorkbook({ accounts, transactions, debts: [] });
+    const cover = workbook.getWorksheet('Portada');
+    expect(cover?.getCell('B2').value).toBe(ledger.global.saldoFisicoCalculado);
+    expect(cover?.getCell('B5').value).toBe(ledger.global.ingresosReportables);
+    expect(cover?.getCell('B6').value).toBe(ledger.global.gastosReportablesOPresentes);
   });
 });
