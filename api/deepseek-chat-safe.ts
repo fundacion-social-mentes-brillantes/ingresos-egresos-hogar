@@ -32,7 +32,7 @@ type AccountResolution =
   | { status: 'missing'; options: string[]; reason: string };
 
 const BUILTIN_ACCOUNTS = new Set(['efectivo', 'nequi', 'daviplata', 'davi plata', 'banco']);
-const STOP_WORDS = new Set(['cuenta', 'cuentas', 'de', 'del', 'la', 'el', 'los', 'las', 'mi', 'mis', 'a', 'al', 'en', 'por', 'pesos', 'peso', 'hoy']);
+const STOP_WORDS = new Set(['cuenta', 'cuentas', 'de', 'del', 'la', 'el', 'los', 'las', 'mi', 'mis', 'a', 'al', 'en', 'por', 'para', 'pesos', 'peso', 'hoy', 'ayer', 'manana', 'mañana']);
 
 function normalizePlainText(value: string): string {
   return String(value || '')
@@ -43,6 +43,15 @@ function normalizePlainText(value: string): string {
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function hasWholePhrase(text: string, phrase: string): boolean {
+  if (!phrase) return false;
+  return new RegExp(`(^|\\s)${escapeRegExp(phrase)}(\\s|$)`, 'i').test(text);
 }
 
 function extractJsonObject(content: string): string {
@@ -97,7 +106,7 @@ function parseSimpleAmount(value: string): number {
 }
 
 function hasAnyPhrase(text: string, phrases: string[]): boolean {
-  return phrases.some((phrase) => new RegExp(`(^|\\W)${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\W|$)`, 'i').test(text));
+  return phrases.some((phrase) => hasWholePhrase(text, normalizePlainText(phrase)));
 }
 
 function inferSimpleType(message: string): FastTransactionType | null {
@@ -185,7 +194,7 @@ function resolveAccountForTransaction(rawUserMessage: string, botAccountName: st
   const text = normalizePlainText(rawUserMessage);
   const botNorm = normalizePlainText(botAccountName || '');
 
-  const exactInMessage = accounts.filter((account) => text.includes(account.normalized));
+  const exactInMessage = accounts.filter((account) => hasWholePhrase(text, account.normalized));
   if (exactInMessage.length === 1) return { status: 'matched', accountName: exactInMessage[0].name, reason: 'Nombre exacto mencionado por el usuario.' };
   if (exactInMessage.length > 1) {
     const ordered = [...exactInMessage].sort((a, b) => b.normalized.length - a.normalized.length);
@@ -195,7 +204,7 @@ function resolveAccountForTransaction(rawUserMessage: string, botAccountName: st
 
   const customMatches = accounts
     .filter((account) => !account.isBuiltin)
-    .map((account) => ({ account, score: account.words.filter((word) => word.length >= 3 && text.includes(word)).length }))
+    .map((account) => ({ account, score: account.words.filter((word) => word.length >= 3 && hasWholePhrase(text, word)).length }))
     .filter((match) => match.score > 0)
     .sort((a, b) => b.score - a.score || b.account.normalized.length - a.account.normalized.length);
   if (customMatches.length === 1 || (customMatches.length > 1 && customMatches[0].score > customMatches[1].score)) {
@@ -212,7 +221,7 @@ function resolveAccountForTransaction(rawUserMessage: string, botAccountName: st
     { aliases: ['banco'], canonical: 'banco' },
   ];
   for (const check of aliasChecks) {
-    if (check.aliases.some((alias) => text.includes(alias))) {
+    if (check.aliases.some((alias) => hasWholePhrase(text, alias))) {
       const matches = accounts.filter((account) => account.normalized === check.canonical);
       if (matches.length === 1) return { status: 'matched', accountName: matches[0].name, reason: `Alias ${check.canonical} mencionado.` };
       if (matches.length > 1) return { status: 'ambiguous', options: matches.map((account) => account.name), reason: `Alias ${check.canonical} coincide con varias cuentas.` };
@@ -221,15 +230,23 @@ function resolveAccountForTransaction(rawUserMessage: string, botAccountName: st
   }
 
   const botExact = accounts.find((account) => account.normalized === botNorm);
-  if (botExact) return { status: 'matched', accountName: botExact.name, reason: 'Cuenta exacta propuesta por el modelo.' };
+  if (botExact) return { status: 'matched', accountName: botExact.name, reason: 'Cuenta exacta propuesta por el modelo y validada contra cuentas reales.' };
 
   if (/\b(cuenta|banco|nequi|daviplata|davi plata|efectivo)\b/.test(text)) {
     return { status: 'missing', options, reason: 'El usuario menciono una cuenta, pero no coincide con ninguna cuenta existente.' };
   }
 
-  const efectivo = accounts.find((account) => account.normalized === 'efectivo');
-  if (efectivo) return { status: 'matched', accountName: efectivo.name, reason: 'Cuenta por defecto segura: Efectivo.' };
-  return { status: 'matched', accountName: accounts[0].name, reason: 'Primera cuenta disponible como fallback.' };
+  if (accounts.length === 1) return { status: 'matched', accountName: accounts[0].name, reason: 'Solo existe una cuenta disponible.' };
+  return { status: 'missing', options, reason: 'No hay cuenta clara en el mensaje. No se usa ninguna cuenta por defecto para evitar errores contables.' };
+}
+
+function accountClarificationAction(resolution: AccountResolution): LocalAction {
+  const accountList = resolution.options.length ? resolution.options.join(', ') : 'no hay cuentas creadas';
+  return {
+    ...localAction(`Para no registrar mal la plata, necesito que me confirmes la cuenta exacta. Cuentas disponibles: ${accountList}.`, 'registro', resolution.options, 'medium'),
+    intent: 'clarify',
+    insights: [{ title: 'Cuenta no confirmada', detail: resolution.reason, severity: 'medium' }],
+  };
 }
 
 function buildFastTransactionAction(message: string, context: unknown): LocalAction | null {
@@ -240,13 +257,7 @@ function buildFastTransactionAction(message: string, context: unknown): LocalAct
 
   const accounts = parseAccountsFromContext(context);
   const resolution = resolveAccountForTransaction(message, undefined, accounts);
-  if (resolution.status !== 'matched') {
-    const accountList = resolution.options.length ? resolution.options.join(', ') : 'no hay cuentas creadas';
-    return {
-      ...localAction(`Para no registrar mal la plata, necesito que me confirmes la cuenta exacta. Cuentas disponibles: ${accountList}.`, 'registro', resolution.options, 'medium'),
-      intent: 'clarify',
-    };
-  }
+  if (resolution.status !== 'matched') return accountClarificationAction(resolution);
 
   const category = inferSimpleCategory(message, type);
   const accountName = resolution.accountName;
@@ -277,9 +288,31 @@ function buildCheapLocalConversation(message: string, hasImage: boolean): LocalA
   return null;
 }
 
-function safeActionFromContent(content: string) {
+function validateActionAccount(rawUserMessage: string, action: any, accounts: ParsedAccount[]): any {
+  if (action?.intent !== 'create_transaction' || !action?.transaction) return action;
+  const resolution = resolveAccountForTransaction(rawUserMessage, action.transaction.accountName, accounts);
+  if (resolution.status !== 'matched') return accountClarificationAction(resolution);
+  const previousName = String(action.transaction.accountName || '').trim();
+  const corrected = {
+    ...action,
+    transaction: { ...action.transaction, accountName: resolution.accountName },
+    confidence: Math.max(Number(action.confidence || 0.75), 0.95),
+    insights: [
+      ...(Array.isArray(action.insights) ? action.insights : []),
+      { title: 'Cuenta validada', detail: `${resolution.accountName}. ${resolution.reason}`, severity: 'low' },
+    ],
+  };
+  if (previousName && normalizePlainText(previousName) !== normalizePlainText(resolution.accountName)) {
+    corrected.replyToUser = String(action.replyToUser || '').replace(new RegExp(escapeRegExp(previousName), 'gi'), resolution.accountName);
+    if (!corrected.replyToUser.includes(resolution.accountName)) corrected.replyToUser = `Listo, lo registro en ${resolution.accountName}.`;
+  }
+  return corrected;
+}
+
+function safeActionFromContent(content: string, rawUserMessage: string, accounts: ParsedAccount[]) {
   try {
-    return JSON.parse(extractJsonObject(content));
+    const action = JSON.parse(extractJsonObject(content));
+    return validateActionAccount(rawUserMessage, action, accounts);
   } catch (error) {
     console.error('DeepSeek returned non JSON content', error, String(content || '').slice(0, 1200));
     return {
@@ -335,6 +368,7 @@ export default async function handler(req: any, res: any) {
   if (message.length > 4000) return res.status(413).json({ error: 'El mensaje es demasiado largo.' });
 
   const hasImage = Boolean(imageBase64 && imageMimeType);
+  const accounts = parseAccountsFromContext(context);
   const localConversationAction = buildCheapLocalConversation(message, hasImage);
   if (localConversationAction && !excelImportContext) return res.status(200).json({ action: localConversationAction, model: 'local-router-safe' });
 
@@ -344,7 +378,7 @@ export default async function handler(req: any, res: any) {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) return res.status(500).json({ error: 'DEEPSEEK_API_KEY no esta configurada en Vercel para este proyecto.', source: 'vercel-env' });
 
-  const accountNames = parseAccountsFromContext(context).map((account) => account.name).join(', ') || 'sin cuentas disponibles';
+  const accountNames = accounts.map((account) => account.name).join(', ') || 'sin cuentas disponibles';
   const excelContextBlock = excelImportContext ? `\n\nEXCEL ADJUNTO POR EL USUARIO:\n${String(excelImportContext).slice(0, 12000)}\n\nAnaliza este Excel como migracion financiera. No digas que ya guardaste si aun no confirmo.` : '';
   const imageContextBlock = hasImage ? '\n\nNOTA TECNICA: El usuario adjunto una imagen, pero este endpoint solo acepta texto. Pidele que escriba valor, cuenta y movimiento.' : '';
 
@@ -360,9 +394,11 @@ ${accountNames}
 
 REGLA CONTABLE CRITICA DE CUENTAS
 - Para crear movimientos, usa una accountName que exista exactamente en CUENTAS REALES DISPONIBLES.
+- La app validara de nuevo la cuenta antes de guardar. Tu respuesta no es autoridad final contable.
 - Las cuentas personalizadas tienen prioridad sobre genericos. Si existe "Cuenta edison" y el usuario dice "cuenta de banco edison", debes usar "Cuenta edison", no "Banco".
 - Nunca elijas Nequi, Banco o Efectivo por saldo o por suposicion.
 - Si el usuario menciona una cuenta que no existe o hay ambiguedad, usa intent "clarify" y pregunta una sola cosa.
+- Si el usuario no menciona cuenta y hay varias cuentas, usa intent "clarify". No uses una cuenta por defecto.
 - No prometas cambios masivos, limpiezas ni correcciones multiples. Pide confirmacion o explica el flujo.
 
 ACCIONES SOPORTADAS
@@ -406,7 +442,7 @@ ${imageContextBlock}
     response_format: { type: 'json_object' },
     thinking: { type: 'enabled' },
     reasoning_effort: 'high',
-    temperature: 0.5,
+    temperature: 0.2,
     max_tokens: 4096,
   };
 
@@ -421,7 +457,7 @@ ${imageContextBlock}
     const data = JSON.parse(raw);
     const content = data?.choices?.[0]?.message?.content;
     if (!content) return res.status(502).json({ error: 'DeepSeek V4 Pro respondio vacio.', source: 'deepseek-v4-pro' });
-    return res.status(200).json({ action: safeActionFromContent(content), model: 'deepseek-v4-pro-safe' });
+    return res.status(200).json({ action: safeActionFromContent(content, message, accounts), model: 'deepseek-v4-pro-safe' });
   } catch (error: any) {
     console.error('Vercel DeepSeek safe route failed', error?.message || error);
     return res.status(500).json({ error: 'Fallo la ruta Vercel segura de DeepSeek V4 Pro.', details: String(error?.message || error), source: 'vercel-route' });
