@@ -2,6 +2,8 @@ declare const process: {
   env: Record<string, string | undefined>;
 };
 
+import { parseSafeChatAmount } from '../src/lib/safeMoney';
+
 type FastTransactionType = 'income' | 'expense';
 
 type LocalAction = {
@@ -103,15 +105,11 @@ function buildCheapLocalConversation(message: string, hasImage: boolean): LocalA
 }
 
 function parseSimpleAmount(value: string): number {
-  const text = normalizePlainText(value).replace(/\s+/g, ' ');
-  const match = text.match(/(?:\$\s*)?(\d+(?:[.,]\d+)?)\s*(mil|lucas?|k|millones?|millon)?/i);
-  if (!match) return 0;
-  const base = Number.parseFloat(match[1].replace(',', '.'));
-  if (!Number.isFinite(base)) return 0;
-  const scale = match[2] || '';
-  if (scale.startsWith('mil') || scale.startsWith('luca') || scale === 'k') return Math.round(base * 1000);
-  if (scale.startsWith('millon')) return Math.round(base * 1000000);
-  return Math.round(base);
+  try {
+    return parseSafeChatAmount(value);
+  } catch {
+    return 0;
+  }
 }
 
 function hasAnyPhrase(text: string, phrases: string[]): boolean {

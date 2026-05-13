@@ -36,7 +36,7 @@ function label(tx: Transaction) {
 }
 
 function protectedMessage(tx: Transaction): string | null {
-  if (isTransfer(tx)) return null;
+  if (isTransfer(tx)) return tx.transferId ? null : 'Movimiento de transferencia protegido: no tiene transferId, asi que no puedo tocar una sola pata.';
   return genericReversalBlockReason(tx);
 }
 
@@ -65,6 +65,7 @@ export function TransactionsPage() {
   }), [transactions, kind, query]);
 
   const totals = useMemo(() => filtered.reduce((a, tx) => {
+    if (tx.isReversed || tx.reversalOf) return a;
     const amount = toMoney(tx.amount);
     if (isReportableFinancialTransaction(tx)) tx.type === 'income' ? a.income += amount : a.expense += amount;
     else if (inferMovementKind(tx).startsWith('transfer')) a.transfer += amount;

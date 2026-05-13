@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Transaction } from '../types';
-import { CHAT_DEBT_BLOCK_MESSAGE, classifyChatAccountingTarget, normalMovementKeepsEditAndDelete } from './chatAccountingSafety';
+import { CHAT_DEBT_BLOCK_MESSAGE, CHAT_REVERSED_BLOCK_MESSAGE, classifyChatAccountingTarget, normalMovementKeepsEditAndDelete } from './chatAccountingSafety';
 
 function tx(overrides: Partial<Transaction> = {}): Transaction {
   return {
@@ -45,6 +45,12 @@ describe('chat accounting safety', () => {
     const decision = classifyChatAccountingTarget(tx({ batchImportId: 'batch-1', movementKind: 'historical_non_reportable', excludeFromReports: true }), 'delete_transaction');
     if (decision.mode !== 'blocked') throw new Error('Expected blocked decision');
     expect(decision.reason).toMatch(/hist[oó]rico|importado/i);
+  });
+
+  it('blocks already reversed movements from chat', () => {
+    const decision = classifyChatAccountingTarget(tx({ isReversed: true }), 'delete_transaction');
+    if (decision.mode !== 'blocked') throw new Error('Expected blocked decision');
+    expect(decision.reason).toBe(CHAT_REVERSED_BLOCK_MESSAGE);
   });
 
   it('keeps pencil and paper bin behavior available for normal movements', () => {

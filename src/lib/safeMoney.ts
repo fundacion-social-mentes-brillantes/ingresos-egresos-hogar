@@ -40,10 +40,11 @@ export function parseSafeChatAmount(value: unknown): number {
   if (value === null || value === undefined || value === '') return 0;
   if (typeof value === 'number') return parseSafeCOP(value);
   const raw = String(value).trim();
+  if (/[-(]/.test(raw)) throw new Error('El dinero no puede ser negativo.');
   try { return parseSafeCOP(raw); } catch {
     const text = raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     const match = text.match(/(?:\$\s*)?([0-9][0-9.,]*)\s*(mil|lucas?|k|millones?|millon)?\b/i);
-    if (!match) return 0;
+    if (!match) throw new Error(`Valor de dinero invalido: ${raw}`);
     const base = parseSafeCOP(match[1]);
     const scale = match[2] || '';
     if (scale.startsWith('mil') || scale.startsWith('luca') || scale === 'k') return base * 1000;

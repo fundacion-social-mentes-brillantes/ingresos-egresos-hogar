@@ -21,7 +21,7 @@ import { db } from './firebase';
 import { createAccountingTransaction, reverseAccountingTransaction } from './accountingOperations';
 import { transferBetweenAccountsSafe } from './transferOperations';
 import { createDebtWithMoneyMovement, registerDebtPaymentWithMoneyMovement, voidDebtWithMoneyMovements } from './debtMoney';
-import { inferMovementKind, isProtectedTransaction, toMoney } from './accounting';
+import { genericReversalBlockReason, inferMovementKind, isProtectedTransaction, toMoney } from './accounting';
 import type {
   Transaction,
   Account,
@@ -244,7 +244,8 @@ export async function updateTransaction(uid: string, id: string, data: Partial<T
   const current = await getDoc(txRef(uid, id));
   if (!current.exists()) return null;
   const previous = normalizeTransaction(current.id, current.data());
-  if (isProtectedTransaction(previous)) throw new Error('Movimiento protegido: corrige desde su flujo especifico para conservar la contabilidad.');
+  const blockReason = genericReversalBlockReason(previous);
+  if (blockReason || isProtectedTransaction(previous)) throw new Error(blockReason || 'Movimiento protegido: corrige desde su flujo especifico para conservar la contabilidad.');
   const nextType = data.type || previous.type;
   const nextAmount = data.amount ?? previous.amount;
   const nextAccountId = data.accountId || previous.accountId;
@@ -268,6 +269,8 @@ export async function deleteTransaction(uid: string, id: string) {
   const current = await getDoc(txRef(uid, id));
   if (!current.exists()) return null;
   const tx = normalizeTransaction(current.id, current.data());
+  const blockReason = genericReversalBlockReason(tx);
+  if (blockReason || isProtectedTransaction(tx)) throw new Error(blockReason || 'Movimiento protegido: usa su flujo seguro para conservar la contabilidad.');
   const deletedRef = await addDoc(deletedTxCol(uid), cleanUndefinedFields({ ...tx, originalId: id, deletedAt: serverTimestamp(), recoverable: true, safeDeletion: true }));
   await reverseAccountingTransaction(uid, id, 'Papelera legacy redirigida a reverso contable');
   return deletedRef.id;
@@ -293,7 +296,7 @@ export async function restoreDeletedTransaction(uid: string, deletedId: string):
     date: restored.date,
     source: restored.source || 'manual',
     rawText: restored.rawText || restored.description,
-    movementKind: restored.type === 'income' ? 'income' : 'expense',
+    movementKind: safeMovementKind(restored),
     excludeFromReports: restored.excludeFromReports,
   });
   await deleteDoc(deletedTxRef(uid, deletedId));

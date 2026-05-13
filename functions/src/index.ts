@@ -131,45 +131,76 @@ function canonicalAccountName(input: string, accounts: any[]): string {
   return cashAcc ? cashAcc.name : accounts.length > 0 ? accounts[0].name : 'Efectivo';
 }
 
+function digitsToInteger(digits: string): number {
+  if (!/^\d+$/.test(digits)) throw new Error(`Valor de dinero invalido: ${digits}`);
+  let total = 0;
+  for (const char of digits) total = total * 10 + (char.charCodeAt(0) - 48);
+  return total;
+}
+
+function hasValidThousandsGroups(value: string, separator: '.' | ','): boolean {
+  const parts = value.split(separator);
+  if (parts.length < 2) return false;
+  if (!/^\d{1,3}$/.test(parts[0])) return false;
+  return parts.slice(1).every((part) => /^\d{3}$/.test(part));
+}
+
+function parseSafeCOP(value: unknown): number {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) throw new Error('Valor de dinero invalido.');
+    return value;
+  }
+
+  const raw = String(value ?? '').trim();
+  if (!raw) throw new Error('Escribe un valor de dinero.');
+  if (/[-(]/.test(raw)) throw new Error('El dinero no puede ser negativo.');
+
+  const cleaned = raw.replace(/cop/gi, '').replace(/\$/g, '').replace(/\s+/g, '').trim();
+  if (!cleaned || !/^[0-9.,]+$/.test(cleaned)) throw new Error(`Valor de dinero invalido: ${raw}`);
+  if (/^\d+$/.test(cleaned)) return digitsToInteger(cleaned);
+
+  const dotCount = (cleaned.match(/\./g) || []).length;
+  const commaCount = (cleaned.match(/,/g) || []).length;
+  if (dotCount > 0 && commaCount > 0) throw new Error(`Valor de dinero ambiguo: ${raw}`);
+
+  const separator = dotCount > 0 ? '.' : ',';
+  if (!hasValidThousandsGroups(cleaned, separator)) throw new Error(`Valor de dinero ambiguo: ${raw}`);
+  return digitsToInteger(cleaned.replace(/[.,]/g, ''));
+}
+
+function parseSafeChatAmount(value: unknown): number {
+  if (value === null || value === undefined || value === '') return 0;
+  if (typeof value === 'number') return parseSafeCOP(value);
+  const raw = String(value).trim();
+  if (/[-(]/.test(raw)) throw new Error('El dinero no puede ser negativo.');
+  try {
+    return parseSafeCOP(raw);
+  } catch {
+    const text = normalizeText(raw);
+    const match = text.match(/(?:\$\s*)?([0-9][0-9.,]*)\s*(mil|lucas?|k|millones?|millon)?\b/i);
+    if (!match) throw new Error(`Valor de dinero invalido: ${raw}`);
+    const base = parseSafeCOP(match[1]);
+    const scale = match[2] || '';
+    if (scale.startsWith('mil') || scale.startsWith('luca') || scale === 'k') return base * 1000;
+    if (scale.startsWith('millon')) return base * 1000000;
+    return base;
+  }
+}
+
 function normalizeAmountFromBot(amount: any): number {
-  if (typeof amount === 'number') return amount;
-  if (!amount) return 0;
-
-  let str = String(amount).toLowerCase().trim();
-
-  if (str.includes('mil') || str.includes('luca')) {
-    const numPart = parseFloat(str.replace(/[^0-9.,]/g, '').replace(',', '.'));
-    if (!Number.isNaN(numPart)) return numPart * 1000;
+  try {
+    return parseSafeChatAmount(amount);
+  } catch {
+    return 0;
   }
-
-  if (str.endsWith('k')) {
-    const numPart = parseFloat(str.replace(/[^0-9.,]/g, '').replace(',', '.'));
-    if (!Number.isNaN(numPart)) return numPart * 1000;
-  }
-
-  if (str.includes('millon')) {
-    const numPart = parseFloat(str.replace(/[^0-9.,]/g, '').replace(',', '.'));
-    if (!Number.isNaN(numPart)) return numPart * 1000000;
-  }
-
-  if (str.includes('.') && str.includes(',')) {
-    str = str.replace(/\./g, '').replace(/,/g, '.');
-  } else if (str.includes('.')) {
-    const parts = str.split('.');
-    if (parts[parts.length - 1].length === 3) str = str.replace(/\./g, '');
-  } else if (str.includes(',')) {
-    str = str.replace(/,/g, '');
-  }
-
-  const finalNum = parseFloat(str.replace(/[^0-9.]/g, ''));
-  return Number.isNaN(finalNum) ? 0 : finalNum;
 }
 
 function extractAmountFromText(message: string): number {
-  const text = normalizeText(message);
-  const moneyMatch = text.match(/(?:\$\s*)?(\d+(?:[.,]\d+)?)\s*(mil|lucas?|k|millones?|millon)?/i);
-  if (!moneyMatch) return 0;
-  return normalizeAmountFromBot(`${moneyMatch[1]} ${moneyMatch[2] || ''}`.trim());
+  try {
+    return parseSafeChatAmount(message);
+  } catch {
+    return 0;
+  }
 }
 
 function inferTypeFromText(message: string): 'income' | 'expense' | null {
@@ -284,6 +315,37 @@ function isLikelyImageError(error: any): boolean {
   return ['image', 'vision', 'multimodal', 'unsupported', 'invalid content', 'image_url'].some((term) => combined.includes(term));
 }
 
+function moneyFromStored(value: any): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.round(value);
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      return parseSafeCOP(value);
+    } catch {
+      return 0;
+    }
+  }
+  return 0;
+}
+
+function inferStoredMovementKind(tx: any): string {
+  if (tx.movementKind) return String(tx.movementKind);
+  const category = normalizeText(tx.category || '');
+  const debtKind = normalizeText(tx.debtMovementKind || '');
+  if (tx.reversalOf) return 'reconciliation_adjustment';
+  if (tx.transferDirection === 'out') return 'transfer_out';
+  if (tx.transferDirection === 'in') return 'transfer_in';
+  if (tx.transferId || category.includes('transferencia entre cuentas')) return tx.type === 'income' ? 'transfer_in' : 'transfer_out';
+  if (tx.debtId || debtKind || category.includes('prestamo') || category.includes('deuda')) return 'debt_movement';
+  if (tx.batchImportId || tx.excludeFromReports) return 'historical_non_reportable';
+  return tx.type === 'income' ? 'income' : tx.type === 'expense' ? 'expense' : 'legacy';
+}
+
+function isReportableStoredTransaction(tx: any): boolean {
+  if (tx.isReversed || tx.reversalOf || tx.excludeFromReports) return false;
+  const kind = inferStoredMovementKind(tx);
+  return kind === 'income' || kind === 'expense' || kind === 'payable_expense_created';
+}
+
 async function getSummaryForUser(uid: string, range: string, category?: string): Promise<FinancialSummary> {
   const db = admin.firestore();
   let startDate = startOfMonth(new Date());
@@ -301,22 +363,22 @@ async function getSummaryForUser(uid: string, range: string, category?: string):
     .where('date', '<=', admin.firestore.Timestamp.fromDate(endDate))
     .get();
 
-  let txs = snap.docs.map((d) => d.data());
+  let txs = snap.docs.map((d) => d.data()).filter(isReportableStoredTransaction);
 
   if (category) {
     const normTarget = normalizeCategory(canonicalCategory(category));
     txs = txs.filter((t) => t.category && normalizeCategory(t.category) === normTarget);
   }
 
-  const income = txs.filter((t) => t.type === 'income').reduce((s, t) => s + Number(t.amount || 0), 0);
-  const expenses = txs.filter((t) => t.type === 'expense').reduce((s, t) => s + Number(t.amount || 0), 0);
+  const income = txs.filter((t) => t.type === 'income').reduce((s, t) => s + moneyFromStored(t.amount), 0);
+  const expenses = txs.filter((t) => t.type === 'expense').reduce((s, t) => s + moneyFromStored(t.amount), 0);
 
   const cats: Record<string, number> = {};
   txs
     .filter((t) => t.type === 'expense')
     .forEach((t) => {
       const categoryName = t.category || 'Otros';
-      cats[categoryName] = (cats[categoryName] || 0) + Number(t.amount || 0);
+      cats[categoryName] = (cats[categoryName] || 0) + moneyFromStored(t.amount);
     });
 
   const sortedCats = Object.entries(cats).sort((a, b) => b[1] - a[1]);
@@ -400,6 +462,14 @@ function sanitizeSummaryData(summaryData: any) {
     range: summaryData.range,
     generatedAt: serializeGeneratedAt(summaryData.generatedAt),
   };
+}
+
+function blockLegacyFinancialWrites(botAction: BotAction) {
+  if (botAction.intent !== 'create_transaction') return;
+  botAction.replyToUser = 'Esta ruta legacy de Firebase ya no registra movimientos financieros. Usa el chat seguro de la app para guardar con cuenta exacta y motor contable blindado.';
+  botAction.intent = 'clarify';
+  botAction.transaction = undefined;
+  botAction.suggestedNextQuestion = '¿Quieres registrarlo desde el chat seguro indicando valor, cuenta y concepto?';
 }
 
 async function callDeepSeek(
@@ -572,7 +642,7 @@ export const chatWithBot = onCall({ ...PUBLIC_CALLABLE_OPTIONS, secrets: [DEEPSE
       const data = d.data();
       return {
         desc: data.description || '',
-        amt: Number(data.amount || 0),
+        amt: moneyFromStored(data.amount),
         type: data.type || '',
         cat: data.category || '',
         date: data.date?.toDate ? data.date.toDate().toISOString() : null,
@@ -583,7 +653,7 @@ export const chatWithBot = onCall({ ...PUBLIC_CALLABLE_OPTIONS, secrets: [DEEPSE
     const chatHistory = allHistory.length > 0 ? allHistory.slice(0, -1).map((d) => d.data()) : [];
     const monthlySummary = await getSummaryForUser(uid, 'this_month');
 
-    const context = `Cuentas: ${accounts.map((a) => `${a.name} ($${Number(a.currentBalance || 0).toLocaleString('es-CO')})`).join(', ')}
+    const context = `Cuentas: ${accounts.map((a) => `${a.name} ($${moneyFromStored(a.currentBalance).toLocaleString('es-CO')})`).join(', ')}
 Movimientos recientes: ${JSON.stringify(recentTxs)}
 Resumen mes: Ingresos $${monthlySummary.totalIncome}, Gastos $${monthlySummary.totalExpenses}, Balance $${monthlySummary.balance}`;
 
@@ -609,6 +679,8 @@ Resumen mes: Ingresos $${monthlySummary.totalIncome}, Gastos $${monthlySummary.t
 
     let transactionCreated: any = null;
     let summaryData: any = null;
+
+    blockLegacyFinancialWrites(botAction);
 
     if (botAction.intent === 'create_transaction' && botAction.transaction && botAction.confidence >= 0.75) {
       const tx = botAction.transaction;

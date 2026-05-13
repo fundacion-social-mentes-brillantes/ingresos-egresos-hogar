@@ -130,7 +130,7 @@ export async function createAccountingTransaction(uid: string, input: {
   const amount = normalizeAmount(input.amount);
   if (amount <= 0) throw new Error('El valor debe ser mayor que cero.');
   const account = await getAccount(uid, input.accountId);
-  const movementKind = input.movementKind || (input.type === 'income' ? 'income' : 'expense');
+  const movementKind = input.movementKind || (input.excludeFromReports ? 'historical_non_reportable' : input.type === 'income' ? 'income' : 'expense');
   const excludeFromReports = input.excludeFromReports ?? !['income', 'expense', 'payable_expense_created'].includes(movementKind);
   const payload = {
     type: input.type,

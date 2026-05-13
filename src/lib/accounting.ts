@@ -1,4 +1,5 @@
 import type { Account, Debt, FinancialSummary, MovementKind, QueryRange, Transaction } from '../types';
+import { digitsToInteger } from './safeMoney';
 
 export type DebtMovementKind =
   | 'loan_principal_out'
@@ -106,17 +107,15 @@ export function parseCurrencyInput(input: unknown): number {
   const cleaned = raw.replace(/cop/gi, '').replace(/\$/g, '').replace(/\s+/g, '').trim();
   if (!cleaned) throw new Error('Escribe un valor de dinero.');
   if (!/^[0-9.,]+$/.test(cleaned)) throw new Error(`Valor de dinero invalido: ${raw}`);
-  if (/^\d+$/.test(cleaned)) return assertValidInteger(Number(cleaned), raw);
+  if (/^\d+$/.test(cleaned)) return assertValidInteger(digitsToInteger(cleaned), raw);
   const dotCount = (cleaned.match(/\./g) || []).length;
   const commaCount = (cleaned.match(/,/g) || []).length;
   if (dotCount > 0 && commaCount > 0) {
-    const allGroups = cleaned.replace(/[.,]/g, '');
-    if (/^\d+$/.test(allGroups)) return assertValidInteger(Number(allGroups), raw);
     throw new Error(`Valor de dinero ambiguo: ${raw}`);
   }
   const separator = dotCount > 0 ? '.' : ',';
   if (!hasValidThousandsGroups(cleaned, separator)) throw new Error(`Valor de dinero ambiguo: ${raw}. Usa pesos completos, por ejemplo 45.000.`);
-  return assertValidInteger(Number(cleaned.replace(/[.,]/g, '')), raw);
+  return assertValidInteger(digitsToInteger(cleaned.replace(/[.,]/g, '')), raw);
 }
 
 export function toMoney(value: unknown): number {
@@ -133,7 +132,7 @@ export function moneyEffect(tx: Pick<Transaction, 'type' | 'amount'>): number {
 }
 
 export function isReversedTransaction(tx: Partial<Transaction>): boolean { return Boolean(tx.isReversed || tx.reversalOf); }
-export function isProtectedTransaction(tx: Partial<TransactionWithAccounting>): boolean { return Boolean(tx.transferId || tx.debtId || tx.debtMovementKind || tx.batchImportId || tx.reversalOf || tx.isReversed); }
+export function isProtectedTransaction(tx: Partial<TransactionWithAccounting>): boolean { return Boolean(tx.transferId || tx.debtId || tx.debtMovementKind || tx.batchImportId || tx.excludeFromReports || tx.reversalOf || tx.isReversed); }
 
 export function inferMovementKind(tx: Partial<TransactionWithAccounting>): MovementKind {
   if (tx.movementKind) return tx.movementKind;
@@ -201,6 +200,7 @@ function addTransactionToSummary(summary: AccountAccountingSummary, tx: Transact
   summary.txCount += 1;
   if (isProtectedTransaction(tx)) summary.movimientosProtegidos += 1;
   if (kind === 'legacy') summary.movimientosLegacy += 1;
+  if (isReversedTransaction(tx)) return;
   if (affectsCash(tx)) { if (isIncome) summary.ingresosFisicos += amount; if (isExpense) { summary.gastosFisicosTotales += amount; summary.salidasFisicasTotales += amount; } }
   if (isReportableFinancialTransaction(tx) && isIncome) summary.ingresosReportables += amount;
   if (isReportableFinancialTransaction(tx) && isExpense) summary.gastosReportablesOPresentes += amount;
