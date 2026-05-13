@@ -67,6 +67,10 @@ service cloud.firestore {
         allow read, write: if isOwner(userId);
       }
 
+      match /accountingAudit/{auditId} {
+        allow read, write: if isOwner(userId);
+      }
+
       match /aiMemory/{memoryId} {
         allow read, write: if isOwner(userId);
       }
