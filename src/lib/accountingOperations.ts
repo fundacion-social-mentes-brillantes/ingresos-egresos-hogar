@@ -61,15 +61,24 @@ async function getTransaction(uid: string, id: string): Promise<Transaction> {
 
 async function getTransactionsForAccount(uid: string, account: Account): Promise<Transaction[]> {
   const byId = await getDocs(query(txCol(uid), where('accountId', '==', account.id)));
-  const items = byId.docs.map((item) => {
+  return byId.docs.map((item) => {
     const data = item.data() as Record<string, any>;
     return { id: item.id, ...data, amount: toMoney(data.amount), date: toDate(data.date), createdAt: toDate(data.createdAt), updatedAt: toDate(data.updatedAt) } as Transaction;
   });
-  return items;
 }
 
 function cashDelta(tx: Partial<Transaction> & { amount: number; type: TransactionType }): number {
   return affectsCash(tx) ? moneyEffect(tx as Transaction) : 0;
+}
+
+export function genericReversalBlockReason(tx: Partial<Transaction>): string | null {
+  const kind = inferMovementKind(tx);
+  if (tx.isReversed) return 'Este movimiento ya fue reversado.';
+  if (tx.reversalOf) return 'Un reverso no se reversa directamente. Corrige creando el movimiento correcto.';
+  if (tx.transferId || kind === 'transfer_in' || kind === 'transfer_out') return 'Movimiento de transferencia protegido: usa reverseTransfer para reversar las dos patas completas.';
+  if (tx.debtId || tx.debtMovementKind || ['loan_given', 'loan_received', 'loan_payment_received', 'debt_payment_made', 'payable_expense_created', 'payable_expense_paid', 'receivable_created'].includes(kind)) return 'Movimiento de deuda protegido: usa el flujo de Deudas para abonar, corregir o anular sin descuadrar.';
+  if (tx.batchImportId || kind === 'historical_non_reportable') return 'Movimiento historico/importado protegido: no se reversa como gasto o ingreso normal.';
+  return null;
 }
 
 export async function confirmRealBalance(uid: string, accountId: string, realBalanceInput: unknown) {
@@ -121,7 +130,7 @@ export async function createAccountingTransaction(uid: string, input: {
   const amount = normalizeAmount(input.amount);
   if (amount <= 0) throw new Error('El valor debe ser mayor que cero.');
   const account = await getAccount(uid, input.accountId);
-  const movementKind = input.movementKind || (input.type === 'income' ? 'income' : 'expense');
+  const movementKind = input.movementKind || (input.excludeFromReports ? 'historical_non_reportable' : input.type === 'income' ? 'income' : 'expense');
   const excludeFromReports = input.excludeFromReports ?? !['income', 'expense', 'payable_expense_created'].includes(movementKind);
   const payload = {
     type: input.type,
@@ -148,9 +157,7 @@ export async function createAccountingTransaction(uid: string, input: {
   const newTx = doc(txCol(uid));
   const batch = writeBatch(db);
   batch.set(newTx, payload);
-  if (delta !== 0) {
-    batch.update(accRef(uid, account.id), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
-  }
+  if (delta !== 0) batch.update(accRef(uid, account.id), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
   batch.set(doc(auditCol(uid)), { action: 'create_accounting_transaction', transactionId: newTx.id, accountId: account.id, amount, movementKind, delta, createdAt: serverTimestamp() });
   await batch.commit();
   return newTx;
@@ -158,8 +165,9 @@ export async function createAccountingTransaction(uid: string, input: {
 
 export async function reverseAccountingTransaction(uid: string, transactionId: string, reason = 'Anulacion contable') {
   const original = await getTransaction(uid, transactionId);
-  if (original.isReversed) throw new Error('Este movimiento ya fue reversado.');
-  if (original.reversalOf) throw new Error('Un reverso no se reversa directamente. Corrige creando el movimiento correcto.');
+  const blockReason = genericReversalBlockReason(original);
+  if (blockReason) throw new Error(blockReason);
+  if (isProtectedTransaction(original)) throw new Error('Movimiento protegido: usa su flujo especifico para conservar la contabilidad.');
   const amount = toMoney(original.amount);
   const reverseType: TransactionType = original.type === 'income' ? 'expense' : 'income';
   const reverseRef = doc(txCol(uid));
@@ -189,9 +197,7 @@ export async function reverseAccountingTransaction(uid: string, transactionId: s
   const batch = writeBatch(db);
   batch.update(txRef(uid, original.id), { isReversed: true, reversedAt: serverTimestamp(), reversalReason: reason, updatedAt: serverTimestamp() });
   batch.set(reverseRef, reversePayload);
-  if (delta !== 0 && original.accountId) {
-    batch.update(accRef(uid, original.accountId), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
-  }
+  if (delta !== 0 && original.accountId) batch.update(accRef(uid, original.accountId), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
   batch.set(doc(auditCol(uid)), { action: 'reverse_transaction', transactionId: original.id, reverseTransactionId: reverseRef.id, reason, delta, createdAt: serverTimestamp() });
   await batch.commit();
   return reverseRef;
@@ -253,41 +259,13 @@ export async function createPayableExpense(uid: string, input: { accountId: stri
   const tx = doc(txCol(uid));
   const batch = writeBatch(db);
   batch.set(debt, {
-    direction: 'payable',
-    personName: input.personName,
-    amountOriginal: amount,
-    amountPaid: 0,
-    currency: 'COP',
-    description: input.description,
-    dueDate: input.dueDate ? Timestamp.fromDate(input.dueDate) : null,
-    status: 'open',
-    source: 'manual',
-    debtKind: 'payable_expense',
-    linkedAccountId: account.id,
-    linkedAccountName: account.name,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    direction: 'payable', personName: input.personName, amountOriginal: amount, amountPaid: 0, currency: 'COP', description: input.description,
+    dueDate: input.dueDate ? Timestamp.fromDate(input.dueDate) : null, status: 'open', source: 'manual', debtKind: 'payable_expense', linkedAccountId: account.id, linkedAccountName: account.name, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
   });
   batch.set(tx, {
-    type: 'expense',
-    amount,
-    currency: 'COP',
-    category: input.category || 'Otros',
-    accountId: account.id,
-    accountName: account.name,
-    description: `Gasto pendiente: ${input.description}`,
-    date: serverTimestamp(),
-    rawText: input.description,
-    source: 'manual',
-    confidence: 1,
-    movementKind: 'payable_expense_created',
-    affectsCash: false,
-    affectsReport: true,
-    affectsDebt: true,
-    debtId: debt.id,
-    excludeFromReports: false,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    type: 'expense', amount, currency: 'COP', category: input.category || 'Otros', accountId: account.id, accountName: account.name,
+    description: `Gasto pendiente: ${input.description}`, date: serverTimestamp(), rawText: input.description, source: 'manual', confidence: 1,
+    movementKind: 'payable_expense_created', affectsCash: false, affectsReport: true, affectsDebt: true, debtId: debt.id, excludeFromReports: false, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
   });
   batch.set(doc(auditCol(uid)), { action: 'create_payable_expense', debtId: debt.id, transactionId: tx.id, amount, createdAt: serverTimestamp() });
   await batch.commit();
@@ -307,25 +285,9 @@ export async function payPayableExpense(uid: string, debtId: string, amountInput
   const tx = doc(txCol(uid));
   const batch = writeBatch(db);
   batch.set(tx, {
-    type: 'expense',
-    amount: applied,
-    currency: 'COP',
-    category: 'Pago gasto pendiente',
-    accountId: account.id,
-    accountName: account.name,
-    description: `Pago de gasto pendiente: ${debt.description}`,
-    date: serverTimestamp(),
-    rawText: `Pago de gasto pendiente ${debtId}`,
-    source: 'manual',
-    confidence: 1,
-    movementKind: 'payable_expense_paid',
-    affectsCash: true,
-    affectsReport: false,
-    affectsDebt: true,
-    debtId,
-    excludeFromReports: true,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    type: 'expense', amount: applied, currency: 'COP', category: 'Pago gasto pendiente', accountId: account.id, accountName: account.name,
+    description: `Pago de gasto pendiente: ${debt.description}`, date: serverTimestamp(), rawText: `Pago de gasto pendiente ${debtId}`, source: 'manual', confidence: 1,
+    movementKind: 'payable_expense_paid', affectsCash: true, affectsReport: false, affectsDebt: true, debtId, excludeFromReports: true, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
   });
   batch.update(debtRef(uid, debtId), { amountPaid: newPaid, status: newStatus, closedAt: newStatus === 'paid' ? serverTimestamp() : null, lastPaymentAccountId: account.id, lastPaymentAccountName: account.name, updatedAt: serverTimestamp() });
   batch.update(accRef(uid, account.id), { currentBalance: increment(-applied), calculatedBalance: increment(-applied), updatedAt: serverTimestamp() });

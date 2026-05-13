@@ -4,11 +4,13 @@ import {
   buildAccountingLedger,
   buildFinancialSummaryForPeriod,
   calculateReconciliation,
+  genericReversalBlockReason,
   inferMovementKind,
   isReportableFinancialTransaction,
   parseCurrencyInput,
 } from './accounting';
 import { buildFinanceWorkbook, buildMonthlyReport } from './reporting';
+import { exportTransactionsToExcel } from './exportExcel';
 
 function account(overrides: Partial<Account> = {}): Account {
   return {
@@ -73,8 +75,28 @@ describe('parseCurrencyInput', () => {
 
   it('rejects ambiguous or invalid money', () => {
     expect(() => parseCurrencyInput('45,50')).toThrow();
+    expect(() => parseCurrencyInput('45,000.00')).toThrow();
     expect(() => parseCurrencyInput('-1000')).toThrow();
     expect(() => parseCurrencyInput('abc')).toThrow();
+  });
+});
+
+describe('protected generic reversals', () => {
+  it('blocks transfers from generic reversal', () => {
+    expect(genericReversalBlockReason(tx({ transferId: 'tr1', transferDirection: 'out', movementKind: 'transfer_out' }))).toMatch(/reverseTransfer/i);
+  });
+
+  it('blocks debt movements from generic reversal', () => {
+    expect(genericReversalBlockReason(tx({ debtId: 'd1', debtMovementKind: 'loan_principal_out', movementKind: 'loan_given' }))).toMatch(/Deudas/i);
+  });
+
+  it('blocks already reversed and reversal transactions', () => {
+    expect(genericReversalBlockReason(tx({ isReversed: true }))).toMatch(/ya fue reversado/i);
+    expect(genericReversalBlockReason(tx({ reversalOf: 'old' }))).toMatch(/reverso no se reversa/i);
+  });
+
+  it('blocks imported historical movements from generic reversal', () => {
+    expect(genericReversalBlockReason(tx({ batchImportId: 'batch1', movementKind: 'historical_non_reportable', excludeFromReports: true }))).toMatch(/historico|importado/i);
   });
 });
 
@@ -91,7 +113,7 @@ describe('movement classification', () => {
 describe('ledger accounting', () => {
   it('separates reportable expenses from historical non-reportable expenses', () => {
     const ledger = buildAccountingLedger(
-      [account()],
+      [account({ initialBalance: 4_200_319, realBalance: 3_551_319 })],
       [
         tx({ id: 'hist', amount: 599_000, excludeFromReports: true, category: 'Abono / Descuento' }),
         tx({ id: 'g1', amount: 25_000, category: 'Alimentacion' }),
@@ -101,11 +123,16 @@ describe('ledger accounting', () => {
     expect(ledger.byAccount.bank.gastosReportablesOPresentes).toBe(45_000);
     expect(ledger.byAccount.bank.gastosHistoricosNoReportables).toBe(599_000);
     expect(ledger.byAccount.bank.salidasFisicasTotales).toBe(644_000);
+    expect(ledger.byAccount.bank.saldoFisicoCalculado).toBe(3_556_319);
+    expect(ledger.byAccount.bank.saldoRealIngresado).toBe(3_551_319);
+    expect(ledger.byAccount.bank.estado).toBe('descuadre');
+    expect(ledger.byAccount.bank.diferenciaConciliacion).toBe(-5_000);
   });
 
   it('shows a 5.000 reconciliation difference when real balance differs from calculated balance', () => {
     const result = calculateReconciliation(3_556_319, 3_551_319);
     expect(result.estado).toBe('descuadre');
+    expect(result.label).not.toBe('Cuadra');
     expect(result.diferencia).toBe(-5_000);
   });
 
@@ -253,5 +280,23 @@ describe('period reporting', () => {
     expect(cover?.getCell('B2').value).toBe(ledger.global.saldoFisicoCalculado);
     expect(cover?.getCell('B5').value).toBe(ledger.global.ingresosReportables);
     expect(cover?.getCell('B6').value).toBe(ledger.global.gastosReportablesOPresentes);
+  });
+
+  it('Excel transaction rows use accounting cash effect for reversals', () => {
+    const accounts = [account({ initialBalance: 100_000 })];
+    const transactions = [
+      tx({ id: 'reversed-original', type: 'expense', amount: 20_000, isReversed: true }),
+      tx({ id: 'reversal-row', type: 'income', amount: 20_000, reversalOf: 'reversed-original', excludeFromReports: true, movementKind: 'reconciliation_adjustment' }),
+      tx({ id: 'active', type: 'expense', amount: 10_000 }),
+    ];
+    const workbook = buildFinanceWorkbook({ accounts, transactions, debts: [] });
+    const sheet = workbook.getWorksheet('Movimientos');
+    expect(sheet?.getRow(2).getCell(9).value).toBe(0);
+    expect(sheet?.getRow(3).getCell(9).value).toBe(0);
+    expect(sheet?.getRow(4).getCell(9).value).toBe(-10_000);
+  });
+
+  it('legacy Excel export is blocked without accounts so it cannot use old totals', async () => {
+    await expect(exportTransactionsToExcel([tx()], 'x.xlsx')).rejects.toThrow(/legacy bloqueada/i);
   });
 });

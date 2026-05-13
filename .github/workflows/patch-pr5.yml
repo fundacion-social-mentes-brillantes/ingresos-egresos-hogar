@@ -1,0 +1,206 @@
+name: Patch PR 5
+
+on:
+  push:
+    branches:
+      - fix/blindaje-contable-editar-borrar
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[skip patch-pr5]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/blindaje-contable-editar-borrar
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Patch large files
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              if old not in s:
+                  raise SystemExit(f'Missing pattern in {path}: {old[:120]!r}')
+              p.write_text(s.replace(old, new, 1))
+
+          def ensure_replace(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              if new in s:
+                  return
+              if old not in s:
+                  raise SystemExit(f'Missing pattern in {path}: {old[:120]!r}')
+              p.write_text(s.replace(old, new, 1))
+
+          # ChatPageSecure: connect safe parser and explicit accounting decisions.
+          chat = Path('src/pages/ChatPageSecure.tsx')
+          s = chat.read_text()
+          s = s.replace("import { createAccountingTransaction, reverseAccountingTransaction } from '../lib/accountingOperations';", "import { createAccountingTransaction, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';")
+          s = s.replace("import { buildFinancialSummaryForPeriod, isProtectedTransaction, parseCurrencyInput, toMoney } from '../lib/accounting';", "import { buildFinancialSummaryForPeriod, toMoney } from '../lib/accounting';")
+          if "../lib/safeMoney" not in s:
+              s = s.replace("import { formatCOP } from '../types';", "import { formatCOP } from '../types';\nimport { parseSafeChatAmount } from '../lib/safeMoney';\nimport { classifyChatAccountingTarget } from '../lib/chatAccountingSafety';")
+          old_parse = """function parseBotAmount(value: number | string | null | undefined): number {\n  if (typeof value === 'number') return toMoney(value);\n  if (!value) return 0;\n  const raw = String(value).trim();\n  try {\n    return parseCurrencyInput(raw);\n  } catch {\n    const text = normalizeText(raw);\n    const match = text.match(/(\\d+(?:[.,]\\d+)?)\\s*(mil|lucas?|k|millones?|millon)?/i);\n    if (!match) return 0;\n    const base = Number(match[1].replace(',', '.'));\n    if (!Number.isFinite(base) || base <= 0) return 0;\n    const scale = match[2] || '';\n    if (scale.startsWith('mil') || scale.startsWith('luca') || scale === 'k') return Math.round(base * 1000);\n    if (scale.startsWith('millon')) return Math.round(base * 1000000);\n    return Math.round(base);\n  }\n}\n"""
+          new_parse = """function parseBotAmount(value: number | string | null | undefined): number {\n  try {\n    return parseSafeChatAmount(value);\n  } catch {\n    return 0;\n  }\n}\n"""
+          if old_parse in s:
+              s = s.replace(old_parse, new_parse, 1)
+          elif new_parse not in s:
+              raise SystemExit('parseBotAmount pattern not found')
+
+          old_build = """  if (action.intent === 'delete_transaction' || looksLikeDeleteRequest(message)) {\n    const tx = await findTransaction(uid, action, message);\n    if (!tx) return null;\n    return { id: crypto.randomUUID(), intent: 'delete_transaction', botAction: action, message, target: tx, summaryText: `Reversar ${tx.type === 'income' ? 'ingreso' : 'gasto'} de ${formatCOP(tx.amount)}: ${tx.description}.` };\n  }\n  if (action.intent === 'update_transaction') {\n    const tx = await findTransaction(uid, action, message);\n    if (!tx) return null;\n    const patch = action.transactionUpdate || {};\n    const amount = parseBotAmount(patch.amount) || tx.amount;\n    return { id: crypto.randomUUID(), intent: 'update_transaction', botAction: action, message, target: tx, summaryText: `Reversar y recrear ${tx.description} con valor ${formatCOP(amount)}.` };\n  }\n"""
+          new_build = """  if (action.intent === 'delete_transaction' || looksLikeDeleteRequest(message)) {\n    const tx = await findTransaction(uid, action, message);\n    if (!tx) return null;\n    const decision = classifyChatAccountingTarget(tx, 'delete_transaction');\n    if (decision.mode === 'blocked') throw new Error(decision.reason);\n    const summaryText = decision.mode === 'transfer'\n      ? `Reversar transferencia completa de ${formatCOP(tx.amount)} (${tx.description}). No se tocará una sola pata.`\n      : `Reversar ${tx.type === 'income' ? 'ingreso' : 'gasto'} de ${formatCOP(tx.amount)}: ${tx.description}.`;\n    return { id: crypto.randomUUID(), intent: 'delete_transaction', botAction: action, message, target: tx, summaryText };\n  }\n  if (action.intent === 'update_transaction') {\n    const tx = await findTransaction(uid, action, message);\n    if (!tx) return null;\n    const decision = classifyChatAccountingTarget(tx, 'update_transaction');\n    if (decision.mode === 'blocked') throw new Error(decision.reason);\n    const patch = action.transactionUpdate || {};\n    const amount = parseBotAmount(patch.amount) || tx.amount;\n    const summaryText = decision.mode === 'transfer'\n      ? `Reversar transferencia completa de ${formatCOP(tx.amount)} (${tx.description}). Luego registra la transferencia correcta.`\n      : `Reversar y recrear ${tx.description} con valor ${formatCOP(amount)}.`;\n    return { id: crypto.randomUUID(), intent: 'update_transaction', botAction: action, message, target: tx, summaryText };\n  }\n"""
+          if old_build in s:
+              s = s.replace(old_build, new_build, 1)
+          elif 'classifyChatAccountingTarget(tx, ' not in s:
+              raise SystemExit('buildPendingAction transaction pattern not found')
+
+          old_delete = """  if (pending.intent === 'delete_transaction') {\n    const tx = pending.target as Transaction;\n    await reverseAccountingTransaction(uid, tx.id, 'Reverso solicitado desde chat');\n    await addActionLog(uid, { action: 'reverse_transaction', entityType: 'transaction', entityId: tx.id, description: `Reversó ${tx.description} desde chat`, before: tx, source: 'bot', status: 'executed' });\n    return `Confirmado. Dejé reverso contable del movimiento ${tx.description} por ${formatCOP(tx.amount)}. No borré historial.`;\n  }\n"""
+          new_delete = """  if (pending.intent === 'delete_transaction') {\n    const tx = pending.target as Transaction;\n    const decision = classifyChatAccountingTarget(tx, 'delete_transaction');\n    if (decision.mode === 'blocked') throw new Error(decision.reason);\n    if (decision.mode === 'transfer') {\n      await reverseTransfer(uid, decision.transferId, 'Reverso de transferencia solicitado desde chat');\n      await addActionLog(uid, { action: 'reverse_transfer', entityType: 'transaction', entityId: tx.id, description: `Reversó transferencia completa ${decision.transferId} desde chat`, before: tx, source: 'bot', status: 'executed' });\n      return `Confirmado. Reversé la transferencia completa de ${formatCOP(tx.amount)}. No toqué una sola pata.`;\n    }\n    await reverseAccountingTransaction(uid, tx.id, 'Reverso solicitado desde chat');\n    await addActionLog(uid, { action: 'reverse_transaction', entityType: 'transaction', entityId: tx.id, description: `Reversó ${tx.description} desde chat`, before: tx, source: 'bot', status: 'executed' });\n    return `Confirmado. Dejé reverso contable del movimiento ${tx.description} por ${formatCOP(tx.amount)}. No borré historial.`;\n  }\n"""
+          if old_delete in s:
+              s = s.replace(old_delete, new_delete, 1)
+          elif 'reverseTransfer(uid, decision.transferId' not in s:
+              raise SystemExit('delete execution pattern not found')
+
+          old_update_guard = """  if (pending.intent === 'update_transaction') {\n    const tx = pending.target as Transaction;\n    if (isProtectedTransaction(tx)) throw new Error('Ese movimiento está protegido. Solo se puede corregir con el flujo específico de su origen.');\n    const patch = pending.botAction.transactionUpdate || {};\n"""
+          new_update_guard = """  if (pending.intent === 'update_transaction') {\n    const tx = pending.target as Transaction;\n    const decision = classifyChatAccountingTarget(tx, 'update_transaction');\n    if (decision.mode === 'blocked') throw new Error(decision.reason);\n    if (decision.mode === 'transfer') {\n      await reverseTransfer(uid, decision.transferId, 'Corrección de transferencia solicitada desde chat');\n      await addActionLog(uid, { action: 'reverse_transfer_for_correction', entityType: 'transaction', entityId: tx.id, description: `Reversó transferencia completa ${decision.transferId} para corrección desde chat`, before: tx, source: 'bot', status: 'executed' });\n      return `Confirmado. Reversé la transferencia completa de ${formatCOP(tx.amount)}. Para corregirla, registra la transferencia correcta con las dos cuentas.`;\n    }\n    const patch = pending.botAction.transactionUpdate || {};\n"""
+          if old_update_guard in s:
+              s = s.replace(old_update_guard, new_update_guard, 1)
+          elif 'reverse_transfer_for_correction' not in s:
+              raise SystemExit('update execution pattern not found')
+          chat.write_text(s)
+
+          # api/deepseek-chat: local safe money parser, no parseFloat for user financial input.
+          api = Path('api/deepseek-chat.ts')
+          s = api.read_text()
+          if 'function digitsToInteger' not in s:
+              marker = "function localConversation(replyToUser: string, mode = 'conversacion', suggestedActions: string[] = []): LocalAction {"
+              helper = r'''
+function digitsToInteger(digits: string): number {
+  if (!/^\d+$/.test(digits)) throw new Error(`Valor de dinero invalido: ${digits}`);
+  let total = 0;
+  for (const char of digits) total = total * 10 + (char.charCodeAt(0) - 48);
+  return total;
+}
+
+function hasValidThousandsGroups(value: string, separator: '.' | ','): boolean {
+  const parts = value.split(separator);
+  if (parts.length < 2) return false;
+  if (!/^\d{1,3}$/.test(parts[0])) return false;
+  return parts.slice(1).every((part) => /^\d{3}$/.test(part));
+}
+
+function parseSafeCOP(value: unknown): number {
+  if (typeof value === 'number') {
+    if (!globalThis.Number.isFinite(value) || !globalThis.Number.isInteger(value) || value < 0) throw new Error('Valor de dinero invalido.');
+    return value;
+  }
+  const raw = String(value ?? '').trim();
+  if (!raw) throw new Error('Escribe un valor de dinero.');
+  if (/[-(]/.test(raw)) throw new Error('El dinero no puede ser negativo.');
+  const cleaned = raw.replace(/cop/gi, '').replace(/\$/g, '').replace(/\s+/g, '').trim();
+  if (!cleaned || !/^[0-9.,]+$/.test(cleaned)) throw new Error(`Valor de dinero invalido: ${raw}`);
+  if (/^\d+$/.test(cleaned)) return digitsToInteger(cleaned);
+  const dotCount = (cleaned.match(/\./g) || []).length;
+  const commaCount = (cleaned.match(/,/g) || []).length;
+  if (dotCount > 0 && commaCount > 0) throw new Error(`Valor de dinero ambiguo: ${raw}`);
+  const separator = dotCount > 0 ? '.' : ',';
+  if (!hasValidThousandsGroups(cleaned, separator)) throw new Error(`Valor de dinero ambiguo: ${raw}. Usa pesos completos, por ejemplo 45.000.`);
+  return digitsToInteger(cleaned.replace(/[.,]/g, ''));
+}
+
+function parseSafeChatAmount(value: unknown): number {
+  if (value === null || value === undefined || value === '') return 0;
+  if (typeof value === 'number') return parseSafeCOP(value);
+  const raw = String(value).trim();
+  try { return parseSafeCOP(raw); } catch {
+    const text = raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const match = text.match(/(?:\$\s*)?([0-9][0-9.,]*)\s*(mil|lucas?|k|millones?|millon)?\b/i);
+    if (!match) return 0;
+    const base = parseSafeCOP(match[1]);
+    const scale = match[2] || '';
+    if (scale.startsWith('mil') || scale.startsWith('luca') || scale === 'k') return base * 1000;
+    if (scale.startsWith('millon')) return base * 1000000;
+    return base;
+  }
+}
+
+'''
+              s = s.replace(marker, helper + marker, 1)
+          old_api_parse = """function parseSimpleAmount(value: string): number {\n  const text = normalizePlainText(value).replace(/\\s+/g, ' ');\n  const match = text.match(/(?:\\$\\s*)?(\\d+(?:[.,]\\d+)?)\\s*(mil|lucas?|k|millones?|millon)?/i);\n  if (!match) return 0;\n  const base = Number.parseFloat(match[1].replace(',', '.'));\n  if (!Number.isFinite(base)) return 0;\n  const scale = match[2] || '';\n  if (scale.startsWith('mil') || scale.startsWith('luca') || scale === 'k') return Math.round(base * 1000);\n  if (scale.startsWith('millon')) return Math.round(base * 1000000);\n  return Math.round(base);\n}\n"""
+          new_api_parse = """function parseSimpleAmount(value: string): number {\n  return parseSafeChatAmount(value);\n}\n"""
+          if old_api_parse in s:
+              s = s.replace(old_api_parse, new_api_parse, 1)
+          elif 'function parseSimpleAmount(value: string): number {\n  return parseSafeChatAmount(value);\n}' not in s:
+              raise SystemExit('api parseSimpleAmount pattern not found')
+          api.write_text(s)
+
+          # functions legacy: block callable so it cannot create accounting movements as a back door.
+          fn = Path('functions/src/index.ts')
+          s = fn.read_text()
+          needle = "  if (!message || typeof message !== 'string') throw new HttpsError('invalid-argument', 'El mensaje es obligatorio.');\n\n  const uid = request.auth.uid;"
+          repl = "  if (!message || typeof message !== 'string') throw new HttpsError('invalid-argument', 'El mensaje es obligatorio.');\n\n  throw new HttpsError('failed-precondition', 'Función legacy bloqueada para movimientos financieros. Usa /api/deepseek-chat con parser seguro y reversos contables.');\n\n  const uid = request.auth.uid;"
+          if repl not in s:
+              if needle not in s:
+                  raise SystemExit('functions legacy block pattern not found')
+              s = s.replace(needle, repl, 1)
+          fn.write_text(s)
+
+          # Static tests for patched large files.
+          Path('src/lib/staticAccountingSafety.test.ts').write_text(r'''import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+
+function file(path: string): string {
+  return readFileSync(path, 'utf8');
+}
+
+describe('static accounting safety wiring', () => {
+  it('api route does not use parseFloat for user money parsing', () => {
+    const source = file('api/deepseek-chat.ts');
+    expect(source).not.toMatch(/parseFloat|Number\.parseFloat/);
+    expect(source).toContain('parseSafeCOP');
+    expect(source).toContain('parseSafeChatAmount');
+  });
+
+  it('legacy callable is blocked as an accounting back door', () => {
+    const source = file('functions/src/index.ts');
+    expect(source).toContain('Función legacy bloqueada');
+    expect(source).toContain('failed-precondition');
+  });
+
+  it('ChatPageSecure routes transfers, debts and imported movements through explicit safety rules', () => {
+    const source = file('src/pages/ChatPageSecure.tsx');
+    expect(source).toContain('classifyChatAccountingTarget');
+    expect(source).toContain('reverseTransfer');
+    expect(source).toContain('reverseAccountingTransaction');
+    expect(source).toContain('createAccountingTransaction');
+    expect(source).toContain('parseSafeChatAmount');
+  });
+});
+''')
+          PY
+      - name: Commit patched files
+        run: |
+          if git diff --quiet; then
+            echo "No patch changes needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/pages/ChatPageSecure.tsx api/deepseek-chat.ts functions/src/index.ts src/lib/staticAccountingSafety.test.ts
+          git commit -m "Completar blindaje de chat API y legacy [skip patch-pr5]"
+          git push origin HEAD:fix/blindaje-contable-editar-borrar
+      - name: Validate after patch
+        run: |
+          npm install
+          npm test
+          npm run build

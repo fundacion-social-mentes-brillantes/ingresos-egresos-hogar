@@ -4,7 +4,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useTransactions } from '../hooks/useTransactions';
 import { getAccounts } from '../lib/firestore';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
-import { createAccountingTransaction, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
+import { createAccountingTransaction, genericReversalBlockReason, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
 import { inferMovementKind, isProtectedTransaction, isReportableFinancialTransaction, parseCurrencyInput, toMoney } from '../lib/accounting';
 import { CATEGORIES, formatCOP } from '../types';
 import type { Account, Transaction, TransactionType } from '../types';
@@ -35,6 +35,11 @@ function label(tx: Transaction) {
   return tx.type === 'income' ? 'Ingreso' : 'Gasto';
 }
 
+function protectedMessage(tx: Transaction): string | null {
+  if (isTransfer(tx)) return tx.transferId ? null : 'Movimiento de transferencia protegido: no tiene transferId, asi que no puedo tocar una sola pata.';
+  return genericReversalBlockReason(tx);
+}
+
 export function TransactionsPage() {
   const { user } = useAuth();
   const { transactions, loading, refresh } = useTransactions();
@@ -60,6 +65,7 @@ export function TransactionsPage() {
   }), [transactions, kind, query]);
 
   const totals = useMemo(() => filtered.reduce((a, tx) => {
+    if (tx.isReversed || tx.reversalOf) return a;
     const amount = toMoney(tx.amount);
     if (isReportableFinancialTransaction(tx)) tx.type === 'income' ? a.income += amount : a.expense += amount;
     else if (inferMovementKind(tx).startsWith('transfer')) a.transfer += amount;
@@ -68,7 +74,12 @@ export function TransactionsPage() {
   }, { income: 0, expense: 0, transfer: 0, history: 0 }), [filtered]);
 
   function openCreate() { setEditing(null); setForm(blank(accounts)); setError(''); setOpen(true); }
-  function openEdit(tx: Transaction) { if (tx.isReversed || tx.reversalOf) return setError('Ese movimiento ya esta reversado.'); setEditing(tx); setForm(formFromTx(tx, accounts)); setError(''); setOpen(true); }
+  function openEdit(tx: Transaction) {
+    if (tx.isReversed || tx.reversalOf) return setError('Ese movimiento ya esta reversado.');
+    const reason = protectedMessage(tx);
+    if (reason) return setError(`${reason} Para deudas usa la pantalla Deudas; para historicos/importados mantenlos como historicos.`);
+    setEditing(tx); setForm(formFromTx(tx, accounts)); setError(''); setOpen(true);
+  }
 
   async function save(e: FormEvent) {
     e.preventDefault();
@@ -84,6 +95,10 @@ export function TransactionsPage() {
         await reverseTransfer(user.uid, editing.transferId, 'Correccion desde Movimientos');
         await transferBetweenAccountsSafe(user.uid, { fromAccountId: from, toAccountId: to, amount, description, date, allowNegativeBalance: true });
       } else {
+        if (editing) {
+          const reason = protectedMessage(editing);
+          if (reason) throw new Error(reason);
+        }
         const account = accounts.find((a) => a.id === form.accountId);
         if (!account) throw new Error('Selecciona una cuenta.');
         if (editing) await reverseAccountingTransaction(user.uid, editing.id, 'Correccion desde Movimientos');
@@ -96,6 +111,8 @@ export function TransactionsPage() {
   async function removeTx(tx: Transaction) {
     if (!user) return;
     if (tx.isReversed || tx.reversalOf) return setError('Ese movimiento ya esta reversado.');
+    const reason = protectedMessage(tx);
+    if (reason) return setError(`${reason} No lo quite como una sola linea para no descuadrar. Usa el flujo especifico.`);
     const ok = window.confirm(isTransfer(tx) ? 'Esto quitara la transferencia completa. Continuar?' : 'Esto quitara el efecto del movimiento. Continuar?');
     if (!ok) return;
     setBusy(tx.id);
@@ -110,7 +127,7 @@ export function TransactionsPage() {
   return <div className="space-y-6 pb-10">
     <section className="lux-hero p-5 sm:p-7">
       <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-        <div><p className="lux-kicker">Libro personal</p><h1 className="lux-heading mt-2 text-3xl sm:text-4xl">Movimientos</h1><p className="lux-subtle mt-2 text-sm">Lapiz para editar. Papelera para quitar. En transferencias se corrigen las dos patas.</p></div>
+        <div><p className="lux-kicker">Libro personal</p><h1 className="lux-heading mt-2 text-3xl sm:text-4xl">Movimientos</h1><p className="lux-subtle mt-2 text-sm">Lapiz para editar. Papelera para quitar. En transferencias se corrigen las dos patas; deudas e historicos mantienen su flujo seguro.</p></div>
         <div className="grid gap-3 sm:min-w-[640px] sm:grid-cols-5"><Metric t="Ingresos" v={totals.income} /><Metric t="Gastos" v={totals.expense} /><Metric t="Historicos" v={totals.history} /><Metric t="Transferencias" v={totals.transfer} /><button className="premium-button rounded-3xl px-4 py-3 font-black" onClick={openCreate}><Plus className="mr-2 inline h-4 w-4" />Manual</button></div>
       </div>
     </section>

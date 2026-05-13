@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import type { Account, ActionLog, Debt, DeletedTransaction, Transaction } from '../types';
-import { buildAccountingLedger, buildFinancialSummaryForPeriod, inferMovementKind, isReportableFinancialTransaction, moneyEffect, summarizeDebts, toMoney } from './accounting';
+import { affectsCash, buildAccountingLedger, buildFinancialSummaryForPeriod, inferMovementKind, isReportableFinancialTransaction, moneyEffect, summarizeDebts, toMoney } from './accounting';
 
 export interface MonthlyReport { totalIncome: number; totalExpenses: number; balance: number; savingsRate: number; topCategory?: [string, number]; byCategory: Record<string, number>; frequentCategories: string[]; alerts: string[]; opportunities: string[]; }
 export type WorkbookParams = { transactions: Transaction[]; debts: Debt[]; accounts: Account[]; deletedTransactions?: DeletedTransaction[]; actionLogs?: ActionLog[]; fileName?: string };
@@ -62,7 +62,7 @@ export function buildFinanceWorkbook(params: WorkbookParams): ExcelJS.Workbook {
 
   const txSheet = workbook.addWorksheet('Movimientos');
   txSheet.columns = [{ header: 'ID', key: 'id', width: 28 }, { header: 'Fecha', key: 'date', width: 20 }, { header: 'Tipo', key: 'type', width: 12 }, { header: 'Naturaleza', key: 'kind', width: 24 }, { header: 'Descripcion', key: 'description', width: 42 }, { header: 'Categoria', key: 'category', width: 24 }, { header: 'Cuenta', key: 'account', width: 24 }, { header: 'Valor', key: 'amount', width: 16 }, { header: 'Efecto caja', key: 'effect', width: 16 }, { header: 'Reportable', key: 'reportable', width: 14 }, { header: 'Reversado', key: 'reversed', width: 12 }, { header: 'Reverso de', key: 'reversalOf', width: 28 }, { header: 'Transfer ID', key: 'transferId', width: 28 }, { header: 'Debt ID', key: 'debtId', width: 28 }];
-  params.transactions.forEach((tx) => txSheet.addRow({ id: tx.id, date: dt(tx.date), type: tx.type, kind: inferMovementKind(tx), description: tx.description, category: tx.category, account: tx.accountName, amount: m(tx.amount), effect: moneyEffect(tx), reportable: isReportableFinancialTransaction(tx) ? 'Si' : 'No', reversed: tx.isReversed ? 'Si' : 'No', reversalOf: tx.reversalOf || '', transferId: tx.transferId || '', debtId: tx.debtId || '' }));
+  params.transactions.forEach((tx) => txSheet.addRow({ id: tx.id, date: dt(tx.date), type: tx.type, kind: inferMovementKind(tx), description: tx.description, category: tx.category, account: tx.accountName, amount: m(tx.amount), effect: affectsCash(tx) ? moneyEffect(tx) : 0, reportable: isReportableFinancialTransaction(tx) ? 'Si' : 'No', reversed: tx.isReversed ? 'Si' : 'No', reversalOf: tx.reversalOf || '', transferId: tx.transferId || '', debtId: tx.debtId || '' }));
   style(txSheet, [8, 9]);
 
   const debtSheet = workbook.addWorksheet('Deudas');

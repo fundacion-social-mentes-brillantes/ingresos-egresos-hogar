@@ -4,9 +4,12 @@ import { AlertCircle, Bot, CheckCircle2, Loader2, Send, ShieldCheck } from 'luci
 import { useAuth } from '../contexts/AuthContext';
 import { auth, db } from '../lib/firebase';
 import { addActionLog, addChatMessage, getAccounts, getDebts, getTransactions, getTransactionsByRange } from '../lib/firestore';
-import { createAccountingTransaction, reverseAccountingTransaction } from '../lib/accountingOperations';
+import { createAccountingTransaction, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
+import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { createDebtWithMoneyMovement, registerDebtPaymentWithMoneyMovement } from '../lib/debtMoney';
-import { buildFinancialSummaryForPeriod, isProtectedTransaction, parseCurrencyInput, toMoney } from '../lib/accounting';
+import { buildFinancialSummaryForPeriod, toMoney } from '../lib/accounting';
+import { classifyChatAccountingTarget } from '../lib/chatAccountingSafety';
+import { parseSafeChatAmount } from '../lib/safeMoney';
 import { getAiMemory, memoryToContext, updateAiMemory } from '../lib/aiMemory';
 import { EmptyState } from '../components/visual/EmptyState';
 import type { Account, AiInsight, AiMemoryProfile, ChatMessage, Debt, DebtDirection, FinancialSummary, Transaction, TransactionType } from '../types';
@@ -70,22 +73,23 @@ function looksLikeDeleteRequest(message: string): boolean {
   return ['borra', 'borrar', 'elimina', 'eliminar', 'quita', 'quitar', 'anula', 'anular'].some((word) => text.includes(word));
 }
 
+function hasAmountValue(value: number | string | null | undefined): boolean {
+  return value !== null && value !== undefined && String(value).trim() !== '';
+}
+
+function parseRequiredBotAmount(value: number | string | null | undefined): number {
+  if (!hasAmountValue(value)) return 0;
+  const amount = parseSafeChatAmount(value);
+  if (amount <= 0) throw new Error('El valor debe ser mayor que cero.');
+  return amount;
+}
+
 function parseBotAmount(value: number | string | null | undefined): number {
-  if (typeof value === 'number') return toMoney(value);
-  if (!value) return 0;
-  const raw = String(value).trim();
+  if (!hasAmountValue(value)) return 0;
   try {
-    return parseCurrencyInput(raw);
+    return parseRequiredBotAmount(value);
   } catch {
-    const text = normalizeText(raw);
-    const match = text.match(/(\d+(?:[.,]\d+)?)\s*(mil|lucas?|k|millones?|millon)?/i);
-    if (!match) return 0;
-    const base = Number(match[1].replace(',', '.'));
-    if (!Number.isFinite(base) || base <= 0) return 0;
-    const scale = match[2] || '';
-    if (scale.startsWith('mil') || scale.startsWith('luca') || scale === 'k') return Math.round(base * 1000);
-    if (scale.startsWith('millon')) return Math.round(base * 1000000);
-    return Math.round(base);
+    return 0;
   }
 }
 
@@ -211,11 +215,13 @@ async function callDeepSeek(payload: Record<string, unknown>, token: string): Pr
 async function findTransaction(uid: string, action: BotActionPro, message: string): Promise<Transaction | null> {
   const transactions = await getTransactions(uid, 100);
   const target = action.deleteTarget || action.updateTarget || {};
-  const amount = parseBotAmount(target.amount);
+  const hasTargetAmount = hasAmountValue(target.amount);
+  const amount = hasTargetAmount ? parseRequiredBotAmount(target.amount) : 0;
   const type = target.type || inferTypeFromMessage(message);
   if (target.scope === 'last_income') return transactions.find((tx) => tx.type === 'income') || null;
   if (target.scope === 'last_expense') return transactions.find((tx) => tx.type === 'expense') || null;
-  if (amount > 0) return transactions.find((tx) => Math.abs(toMoney(tx.amount) - amount) < 1 && (type ? tx.type === type : true)) || null;
+  if (target.scope === 'amount_match' && !hasTargetAmount) return null;
+  if (hasTargetAmount) return transactions.find((tx) => Math.abs(toMoney(tx.amount) - amount) < 1 && (type ? tx.type === type : true)) || null;
   if (type) return transactions.find((tx) => tx.type === type) || null;
   return transactions[0] || null;
 }
@@ -231,21 +237,31 @@ async function buildPendingAction(uid: string, action: BotActionPro, message: st
   if (action.intent === 'delete_transaction' || looksLikeDeleteRequest(message)) {
     const tx = await findTransaction(uid, action, message);
     if (!tx) return null;
-    return { id: crypto.randomUUID(), intent: 'delete_transaction', botAction: action, message, target: tx, summaryText: `Reversar ${tx.type === 'income' ? 'ingreso' : 'gasto'} de ${formatCOP(tx.amount)}: ${tx.description}.` };
+    const decision = classifyChatAccountingTarget(tx, 'delete_transaction');
+    if (decision.mode === 'blocked') throw new Error(decision.reason);
+    const summaryText = decision.mode === 'transfer'
+      ? `Reversar la transferencia completa de ${formatCOP(tx.amount)}: ${tx.description}.`
+      : `Reversar ${tx.type === 'income' ? 'ingreso' : 'gasto'} de ${formatCOP(tx.amount)}: ${tx.description}.`;
+    return { id: crypto.randomUUID(), intent: 'delete_transaction', botAction: action, message, target: tx, summaryText };
   }
   if (action.intent === 'update_transaction') {
     const tx = await findTransaction(uid, action, message);
     if (!tx) return null;
+    const decision = classifyChatAccountingTarget(tx, 'update_transaction');
+    if (decision.mode === 'blocked') throw new Error(decision.reason);
     const patch = action.transactionUpdate || {};
-    const amount = parseBotAmount(patch.amount) || tx.amount;
-    return { id: crypto.randomUUID(), intent: 'update_transaction', botAction: action, message, target: tx, summaryText: `Reversar y recrear ${tx.description} con valor ${formatCOP(amount)}.` };
+    const amount = hasAmountValue(patch.amount) ? parseRequiredBotAmount(patch.amount) : tx.amount;
+    const summaryText = decision.mode === 'transfer'
+      ? `Reversar y recrear la transferencia completa ${tx.description} con valor ${formatCOP(amount)}.`
+      : `Reversar y recrear ${tx.description} con valor ${formatCOP(amount)}.`;
+    return { id: crypto.randomUUID(), intent: 'update_transaction', botAction: action, message, target: tx, summaryText };
   }
   if (action.intent === 'register_debt_payment' || action.intent === 'close_debt') {
     const debt = await findDebt(uid, action);
     if (!debt) return null;
     const account = resolveAccount(accounts, message, action.debtPayment?.accountName);
     if (!account) throw new Error(`Para registrar el abono necesito la cuenta exacta. Cuentas disponibles: ${accountOptionsText(accounts)}.`);
-    const amount = action.intent === 'close_debt' ? debtRemaining(debt) : parseBotAmount(action.debtPayment?.amount);
+    const amount = action.intent === 'close_debt' ? debtRemaining(debt) : parseRequiredBotAmount(action.debtPayment?.amount);
     return { id: crypto.randomUUID(), intent: action.intent as DangerousIntent, botAction: action, message, target: debt, account, summaryText: `Registrar ${action.intent === 'close_debt' ? 'pago total' : 'abono'} de ${formatCOP(amount)} en la deuda con ${debt.personName}, usando ${account.name}.` };
   }
   return null;
@@ -254,15 +270,39 @@ async function buildPendingAction(uid: string, action: BotActionPro, message: st
 async function executePendingAction(uid: string, pending: PendingAction): Promise<string> {
   if (pending.intent === 'delete_transaction') {
     const tx = pending.target as Transaction;
+    const decision = classifyChatAccountingTarget(tx, 'delete_transaction');
+    if (decision.mode === 'blocked') throw new Error(decision.reason);
+    if (decision.mode === 'transfer') {
+      await reverseTransfer(uid, decision.transferId, 'Reverso de transferencia solicitado desde chat');
+      await addActionLog(uid, { action: 'reverse_transfer_from_chat', entityType: 'transaction', entityId: tx.id, description: `Reverso completo de transferencia ${decision.transferId} desde chat`, before: tx, source: 'bot', status: 'executed' });
+      return `Confirmado. Reversé la transferencia completa por ${formatCOP(tx.amount)}. No toqué una sola pata.`;
+    }
     await reverseAccountingTransaction(uid, tx.id, 'Reverso solicitado desde chat');
     await addActionLog(uid, { action: 'reverse_transaction', entityType: 'transaction', entityId: tx.id, description: `Reversó ${tx.description} desde chat`, before: tx, source: 'bot', status: 'executed' });
     return `Confirmado. Dejé reverso contable del movimiento ${tx.description} por ${formatCOP(tx.amount)}. No borré historial.`;
   }
   if (pending.intent === 'update_transaction') {
     const tx = pending.target as Transaction;
-    if (isProtectedTransaction(tx)) throw new Error('Ese movimiento está protegido. Solo se puede corregir con el flujo específico de su origen.');
+    const decision = classifyChatAccountingTarget(tx, 'update_transaction');
+    if (decision.mode === 'blocked') throw new Error(decision.reason);
     const patch = pending.botAction.transactionUpdate || {};
-    const amount = parseBotAmount(patch.amount) || tx.amount;
+    const amount = hasAmountValue(patch.amount) ? parseRequiredBotAmount(patch.amount) : tx.amount;
+    if (decision.mode === 'transfer') {
+      const fromAccountId = tx.transferDirection === 'in' ? tx.transferAccountId : tx.accountId;
+      const toAccountId = tx.transferDirection === 'in' ? tx.accountId : tx.transferAccountId;
+      if (!fromAccountId || !toAccountId || fromAccountId === toAccountId) throw new Error('No pude identificar las dos cuentas de la transferencia. Haz la corrección desde Movimientos.');
+      await reverseTransfer(uid, decision.transferId, 'Corrección de transferencia solicitada desde chat');
+      const created = await transferBetweenAccountsSafe(uid, {
+        fromAccountId,
+        toAccountId,
+        amount,
+        description: patch.description || tx.description,
+        date: new Date(),
+        allowNegativeBalance: true,
+      });
+      await addActionLog(uid, { action: 'correct_transfer_with_reversal', entityType: 'transaction', entityId: tx.id, description: `Corrigió transferencia ${decision.transferId} con reverso completo`, before: tx, after: { transferId: created.transferId, amount }, source: 'bot', status: 'executed' });
+      return `Confirmado. Reversé la transferencia completa y creé la corrección por ${formatCOP(amount)}.`;
+    }
     await reverseAccountingTransaction(uid, tx.id, 'Corrección solicitada desde chat');
     const created = await createAccountingTransaction(uid, {
       type: tx.type,
@@ -280,7 +320,7 @@ async function executePendingAction(uid: string, pending: PendingAction): Promis
   }
   const debt = pending.target as Debt;
   const account = pending.account as Account;
-  const amount = pending.intent === 'close_debt' ? debtRemaining(debt) : parseBotAmount(pending.botAction.debtPayment?.amount);
+  const amount = pending.intent === 'close_debt' ? debtRemaining(debt) : parseRequiredBotAmount(pending.botAction.debtPayment?.amount);
   if (amount <= 0) throw new Error('Falta el valor exacto del abono.');
   await registerDebtPaymentWithMoneyMovement(uid, debt.id, amount, account);
   await addActionLog(uid, { action: pending.intent, entityType: 'debt', entityId: debt.id, description: `Registró pago/abono de ${formatCOP(amount)} en deuda con ${debt.personName}`, before: debt, after: { amount, accountId: account.id }, source: 'bot', status: 'executed' });
