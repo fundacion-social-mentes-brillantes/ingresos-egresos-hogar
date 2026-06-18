@@ -12,7 +12,9 @@ import {
   query,
   orderBy,
   limit,
+  startAfter,
   where,
+  increment,
   Timestamp,
   serverTimestamp,
   writeBatch,
@@ -165,18 +167,19 @@ export async function updateAccount(uid: string, id: string, data: Partial<Accou
 export async function createBatchImportFromPreview(uid: string, preview: BatchImportPreview) {
   const accountName = preview.accountName.trim();
   const duplicate = (await getAccounts(uid)).find((account) => normalizeComparableName(account.name) === normalizeComparableName(accountName));
+  // Un lote fija el saldo de la cuenta de forma absoluta, asi que solo tiene
+  // sentido sobre una cuenta NUEVA. Si ya existe una con ese nombre, abortamos
+  // para no pisar saldos ni movimientos previos (antes el update los borraba).
+  if (duplicate) throw new Error(`Ya existe una cuenta llamada "${duplicate.name}". Para importar este lote usa un nombre de cuenta nuevo y unico; asi no se sobreescribe ningun saldo existente.`);
+
   const batch = writeBatch(db);
-  const targetAccountRef = duplicate ? accRef(uid, duplicate.id) : doc(accCol(uid));
+  const targetAccountRef = doc(accCol(uid));
   const batchImportId = targetAccountRef.id;
   const importedAt = new Date();
   const initialBalance = toMoney(preview.totalValue || 0);
   const currentBalance = toMoney(preview.expectedPendingBalance || 0);
 
-  if (duplicate?.batchImportId) throw new Error(`La cuenta ${duplicate.name} ya parece tener una importacion por lote. No se guardo nada para evitar duplicados.`);
-
-  const accountPayload = { initialBalance, currentBalance, calculatedBalance: currentBalance, active: true, batchImportId, updatedAt: serverTimestamp() };
-  if (duplicate) batch.update(targetAccountRef, cleanUndefinedFields(accountPayload));
-  else batch.set(targetAccountRef, cleanUndefinedFields({ name: accountName, type: 'other' as const, ...accountPayload, createdAt: serverTimestamp() }));
+  batch.set(targetAccountRef, cleanUndefinedFields({ name: accountName, type: 'other' as const, initialBalance, currentBalance, calculatedBalance: currentBalance, active: true, batchImportId, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }));
 
   preview.movements.forEach((movement, index) => {
     const newTransactionRef = doc(txCol(uid));
@@ -205,7 +208,7 @@ export async function createBatchImportFromPreview(uid: string, preview: BatchIm
   });
 
   await batch.commit();
-  return { accountId: targetAccountRef.id, accountName: duplicate?.name || accountName, count: preview.movements.length };
+  return { accountId: targetAccountRef.id, accountName, count: preview.movements.length };
 }
 
 export async function transferBetweenAccounts(uid: string, params: { fromAccountId: string; toAccountId: string; amount: number; description?: string; date?: Date; allowNegativeBalance?: boolean; }) {
@@ -221,6 +224,86 @@ export async function getTransactions(uid: string, limitCount = 100): Promise<Tr
 export async function getTransactionsByRange(uid: string, startDate: Date, endDate: Date): Promise<Transaction[]> {
   const snap = await getDocs(query(txCol(uid), where('date', '>=', Timestamp.fromDate(startDate)), where('date', '<=', Timestamp.fromDate(endDate)), orderBy('date', 'desc')));
   return snap.docs.map((d) => normalizeTransaction(d.id, d.data()));
+}
+
+// Carga TODOS los movimientos paginando, para que los calculos de saldo y
+// conciliacion usen el historial completo y no solo los mas recientes. Un
+// listener con limit(500) servia para listar, pero recalcular el saldo sobre
+// un set truncado generaba descuadres falsos en cuentas con mucho historial.
+export async function getAllTransactions(uid: string): Promise<Transaction[]> {
+  const pageSize = 500;
+  const out: Transaction[] = [];
+  let cursor: any = null;
+  for (;;) {
+    const page = cursor
+      ? query(txCol(uid), orderBy('date', 'desc'), startAfter(cursor), limit(pageSize))
+      : query(txCol(uid), orderBy('date', 'desc'), limit(pageSize));
+    const snap = await getDocs(page);
+    snap.docs.forEach((d) => out.push(normalizeTransaction(d.id, d.data())));
+    if (snap.docs.length < pageSize) break;
+    cursor = snap.docs[snap.docs.length - 1];
+  }
+  return out;
+}
+
+// Importacion de archivo Excel/CSV de forma ATOMICA y en lote: en vez de un
+// commit por fila (que dejaba importaciones a medias si algo fallaba y permitia
+// duplicar al re-confirmar), escribe los movimientos y ajusta el saldo de cada
+// cuenta en lotes de hasta 400 operaciones. Cada chunk entra completo o no entra.
+export async function createFileImportTransactions(uid: string, drafts: LegacyTransactionInput[]) {
+  const valid = drafts
+    .map((draft) => ({ ...draft, amount: toMoney(draft.amount) }))
+    .filter((draft) => draft.accountId && draft.amount > 0 && (draft.type === 'income' || draft.type === 'expense'));
+  if (valid.length === 0) throw new Error('No hay movimientos validos para importar.');
+
+  const fileImportId = doc(txCol(uid)).id;
+  const chunkSize = 400;
+  let saved = 0;
+
+  for (let start = 0; start < valid.length; start += chunkSize) {
+    const chunk = valid.slice(start, start + chunkSize);
+    const batch = writeBatch(db);
+    const deltaByAccount = new Map<string, number>();
+
+    chunk.forEach((draft, indexInChunk) => {
+      const movementKind = draft.type === 'income' ? 'income' : 'expense';
+      const newTxRef = doc(txCol(uid));
+      batch.set(newTxRef, cleanUndefinedFields({
+        type: draft.type,
+        amount: draft.amount,
+        currency: 'COP' as const,
+        category: draft.category || (draft.type === 'income' ? 'Ingreso' : 'Otros'),
+        accountId: draft.accountId,
+        accountName: draft.accountName,
+        description: draft.description || 'Movimiento importado',
+        date: draft.date instanceof Date ? Timestamp.fromDate(draft.date) : Timestamp.fromDate(toDate(draft.date)),
+        rawText: draft.rawText || draft.description || '',
+        source: 'manual' as const,
+        confidence: draft.confidence ?? 1,
+        movementKind,
+        affectsCash: true,
+        affectsReport: true,
+        affectsDebt: false,
+        excludeFromReports: false,
+        fileImportId,
+        importRow: start + indexInChunk + 1,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      }));
+      const delta = draft.type === 'income' ? draft.amount : -draft.amount;
+      deltaByAccount.set(draft.accountId, (deltaByAccount.get(draft.accountId) || 0) + delta);
+    });
+
+    deltaByAccount.forEach((delta, accountId) => {
+      if (delta !== 0) batch.update(accRef(uid, accountId), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
+    });
+    batch.set(doc(actionLogCol(uid)), cleanUndefinedFields({ action: 'import_excel_file', entityType: 'transaction', description: `Importacion de archivo: ${chunk.length} movimientos`, after: { fileImportId, count: chunk.length }, source: 'manual', status: 'executed', createdAt: serverTimestamp() }));
+
+    await batch.commit();
+    saved += chunk.length;
+  }
+
+  return { count: saved, skipped: drafts.length - valid.length, fileImportId };
 }
 
 export async function addTransaction(uid: string, data: LegacyTransactionInput) {

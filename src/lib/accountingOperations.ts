@@ -275,24 +275,31 @@ export async function createPayableExpense(uid: string, input: { accountId: stri
 export async function payPayableExpense(uid: string, debtId: string, amountInput: unknown, account: Account) {
   const amount = normalizeAmount(amountInput);
   if (amount <= 0) throw new Error('El abono debe ser mayor que cero.');
-  const snap = await getDoc(debtRef(uid, debtId));
-  if (!snap.exists()) throw new Error('La deuda no existe.');
-  const debt = { id: snap.id, ...snap.data() } as Debt;
-  if (debt.direction !== 'payable') throw new Error('Solo se pueden pagar cuentas por pagar.');
-  const applied = Math.min(amount, Math.max(0, toMoney(debt.amountOriginal) - toMoney(debt.amountPaid)));
-  const newPaid = toMoney(debt.amountPaid) + applied;
-  const newStatus = newPaid >= toMoney(debt.amountOriginal) ? 'paid' : 'partial';
+  if (!account?.id) throw new Error('Elige la cuenta para mover la plata.');
   const tx = doc(txCol(uid));
-  const batch = writeBatch(db);
-  batch.set(tx, {
-    type: 'expense', amount: applied, currency: 'COP', category: 'Pago gasto pendiente', accountId: account.id, accountName: account.name,
-    description: `Pago de gasto pendiente: ${debt.description}`, date: serverTimestamp(), rawText: `Pago de gasto pendiente ${debtId}`, source: 'manual', confidence: 1,
-    movementKind: 'payable_expense_paid', affectsCash: true, affectsReport: false, affectsDebt: true, debtId, excludeFromReports: true, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+  const auditDoc = doc(auditCol(uid));
+  // runTransaction (no writeBatch) para que la lectura del saldo de la deuda y
+  // la escritura de amountPaid sean atomicas: dos pagos simultaneos ya no se
+  // pisan ni dejan amountPaid inconsistente.
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(debtRef(uid, debtId));
+    if (!snap.exists()) throw new Error('La deuda no existe.');
+    const debt = { id: snap.id, ...snap.data() } as Debt;
+    if (debt.direction !== 'payable') throw new Error('Solo se pueden pagar cuentas por pagar.');
+    const pendiente = Math.max(0, toMoney(debt.amountOriginal) - toMoney(debt.amountPaid));
+    const applied = Math.min(amount, pendiente);
+    if (applied <= 0) throw new Error('Esta cuenta por pagar ya esta saldada.');
+    const newPaid = toMoney(debt.amountPaid) + applied;
+    const newStatus = newPaid >= toMoney(debt.amountOriginal) ? 'paid' : 'partial';
+    transaction.set(tx, {
+      type: 'expense', amount: applied, currency: 'COP', category: 'Pago gasto pendiente', accountId: account.id, accountName: account.name,
+      description: `Pago de gasto pendiente: ${debt.description}`, date: serverTimestamp(), rawText: `Pago de gasto pendiente ${debtId}`, source: 'manual', confidence: 1,
+      movementKind: 'payable_expense_paid', affectsCash: true, affectsReport: false, affectsDebt: true, debtId, excludeFromReports: true, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    });
+    transaction.update(debtRef(uid, debtId), { amountPaid: newPaid, status: newStatus, closedAt: newStatus === 'paid' ? serverTimestamp() : null, lastPaymentAccountId: account.id, lastPaymentAccountName: account.name, updatedAt: serverTimestamp() });
+    transaction.update(accRef(uid, account.id), { currentBalance: increment(-applied), calculatedBalance: increment(-applied), updatedAt: serverTimestamp() });
+    transaction.set(auditDoc, { action: 'pay_payable_expense', debtId, transactionId: tx.id, amount: applied, createdAt: serverTimestamp() });
   });
-  batch.update(debtRef(uid, debtId), { amountPaid: newPaid, status: newStatus, closedAt: newStatus === 'paid' ? serverTimestamp() : null, lastPaymentAccountId: account.id, lastPaymentAccountName: account.name, updatedAt: serverTimestamp() });
-  batch.update(accRef(uid, account.id), { currentBalance: increment(-applied), calculatedBalance: increment(-applied), updatedAt: serverTimestamp() });
-  batch.set(doc(auditCol(uid)), { action: 'pay_payable_expense', debtId, transactionId: tx.id, amount: applied, createdAt: serverTimestamp() });
-  await batch.commit();
   return tx;
 }
 

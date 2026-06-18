@@ -234,6 +234,29 @@ describe('ledger accounting', () => {
   });
 });
 
+describe('atribucion de movimientos por cuenta', () => {
+  it('usa accountId y no duplica el movimiento en cuentas con el mismo nombre', () => {
+    const accounts = [
+      account({ id: 'a1', name: 'Banco', initialBalance: 100_000, currentBalance: 100_000 }),
+      account({ id: 'a2', name: 'Banco', type: 'cash', initialBalance: 0, currentBalance: 0 }),
+    ];
+    const transactions = [tx({ id: 'g1', type: 'expense', amount: 30_000, accountId: 'a1', accountName: 'Banco' })];
+    const ledger = buildAccountingLedger(accounts, transactions);
+    expect(ledger.byAccount.a1.salidasFisicasTotales).toBe(30_000);
+    expect(ledger.byAccount.a2.salidasFisicasTotales).toBe(0);
+    // Antes (match por nombre) se contaba en ambas cuentas y el global se duplicaba.
+    expect(ledger.global.salidasFisicasTotales).toBe(30_000);
+  });
+
+  it('cae al nombre solo cuando el movimiento legacy no trae accountId', () => {
+    const accounts = [account({ id: 'a1', name: 'Efectivo', initialBalance: 0, currentBalance: 0 })];
+    const legacy = tx({ id: 'old', type: 'expense', amount: 5_000, accountName: 'Efectivo' });
+    delete (legacy as Partial<Transaction>).accountId;
+    const ledger = buildAccountingLedger(accounts, [legacy]);
+    expect(ledger.byAccount.a1.salidasFisicasTotales).toBe(5_000);
+  });
+});
+
 describe('period reporting', () => {
   it('uses the same reportable rules as the accounting engine', () => {
     const start = new Date('2026-05-01T00:00:00');

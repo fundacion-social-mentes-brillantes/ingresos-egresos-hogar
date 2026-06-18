@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Upload, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, Database, ArrowRight } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { addAccount, addTransaction, createBatchImportFromPreview, getAccounts } from '../lib/firestore';
+import { addAccount, createFileImportTransactions, createBatchImportFromPreview, getAccounts } from '../lib/firestore';
 import { DEFAULT_ACCOUNTS, formatCOP } from '../types';
 import type { Account } from '../types';
 import { parseExcelFile, type ImportedTransactionDraft, type ImportPreviewResult } from '../lib/importExcel';
@@ -145,12 +145,15 @@ export function ImportPage() {
     setDone(null);
 
     try {
-      for (const draft of preview.drafts) {
-        await addTransaction(user.uid, draft);
-      }
-      setDone({ count: preview.drafts.length });
+      // Guardado atomico por lote: ya no es un commit por fila (que dejaba
+      // importaciones a medias). Limpiamos la vista previa al terminar para que
+      // no se pueda volver a confirmar el mismo archivo y duplicar movimientos.
+      const result = await createFileImportTransactions(user.uid, preview.drafts);
+      setDone({ count: result.count });
+      setPreview(null);
+      setFileName('');
     } catch (err: any) {
-      setError(err?.message || 'No pude guardar los movimientos.');
+      setError(err?.message || 'No pude guardar los movimientos. Si fallo a mitad, ningun bloque quedo a medias.');
     } finally {
       setSaving(false);
     }

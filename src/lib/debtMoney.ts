@@ -1,4 +1,4 @@
-import { collection, doc, getDoc, getDocs, increment, query, serverTimestamp, Timestamp, where, writeBatch } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, increment, query, runTransaction, serverTimestamp, Timestamp, where, writeBatch } from 'firebase/firestore';
 import { db } from './firebase';
 import type { Account, Debt, DebtDirection } from '../types';
 import { affectsCash, toMoney } from './accounting';
@@ -123,62 +123,69 @@ export async function createDebtWithMoneyMovement(uid: string, data: NewDebtInpu
 
 export async function registerDebtPaymentWithMoneyMovement(uid: string, debtId: string, amount: number, account: Account) {
   if (!account?.id) throw new Error('Elige la cuenta para mover la plata.');
-  const snap = await getDoc(debtRef(uid, debtId));
-  if (!snap.exists()) throw new Error('No encontre la deuda.');
-  const debt = normalizeDebt(snap.id, snap.data());
-  const applied = Math.min(remaining(debt), toMoney(amount || 0));
-  if (!applied || applied <= 0) throw new Error('El abono debe ser mayor que cero.');
-
-  const isReceivable = debt.direction === 'receivable';
-  const newPaid = Math.min(debt.amountOriginal, debt.amountPaid + applied);
-  const newStatus = newPaid >= debt.amountOriginal ? 'paid' : newPaid > 0 ? 'partial' : 'open';
+  const requested = toMoney(amount || 0);
+  if (requested <= 0) throw new Error('El abono debe ser mayor que cero.');
   const tx = doc(txCol(uid));
-  const batch = writeBatch(db);
-  const description = isReceivable ? `Abono recibido de ${debt.personName}: ${debt.description}` : `Pago de deuda a ${debt.personName}: ${debt.description}`;
-  const type = isReceivable ? 'income' : 'expense';
-  const movementKind = isReceivable ? 'loan_payment_received' : 'debt_payment_made';
-  const delta = isReceivable ? applied : -applied;
+  const auditDoc = doc(auditCol(uid));
+  const fechaTs = Timestamp.fromDate(new Date());
 
-  batch.update(debtRef(uid, debt.id), {
-    amountPaid: newPaid,
-    status: newStatus,
-    closedAt: newStatus === 'paid' ? serverTimestamp() : null,
-    lastPaymentAccountId: account.id,
-    lastPaymentAccountName: account.name,
-    updatedAt: serverTimestamp(),
+  // runTransaction (no writeBatch): la lectura de la deuda y la escritura de
+  // amountPaid quedan atomicas, asi dos abonos simultaneos no se pisan.
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(debtRef(uid, debtId));
+    if (!snap.exists()) throw new Error('No encontre la deuda.');
+    const debt = normalizeDebt(snap.id, snap.data());
+    const applied = Math.min(remaining(debt), requested);
+    if (applied <= 0) throw new Error('Esta deuda ya esta saldada.');
+
+    const isReceivable = debt.direction === 'receivable';
+    const newPaid = Math.min(debt.amountOriginal, debt.amountPaid + applied);
+    const newStatus = newPaid >= debt.amountOriginal ? 'paid' : newPaid > 0 ? 'partial' : 'open';
+    const description = isReceivable ? `Abono recibido de ${debt.personName}: ${debt.description}` : `Pago de deuda a ${debt.personName}: ${debt.description}`;
+    const type = isReceivable ? 'income' : 'expense';
+    const movementKind = isReceivable ? 'loan_payment_received' : 'debt_payment_made';
+    const delta = isReceivable ? applied : -applied;
+
+    transaction.update(debtRef(uid, debt.id), {
+      amountPaid: newPaid,
+      status: newStatus,
+      closedAt: newStatus === 'paid' ? serverTimestamp() : null,
+      lastPaymentAccountId: account.id,
+      lastPaymentAccountName: account.name,
+      updatedAt: serverTimestamp(),
+    });
+
+    transaction.set(tx, {
+      type,
+      amount: applied,
+      currency: 'COP',
+      category: isReceivable ? 'Pago deuda recibida' : 'Pago deuda pagada',
+      accountId: account.id,
+      accountName: account.name,
+      description,
+      date: fechaTs,
+      rawText: description,
+      source: 'manual',
+      confidence: 1,
+      debtId: debt.id,
+      debtMovementKind: isReceivable ? 'debt_payment_in' : 'debt_payment_out',
+      movementKind,
+      affectsCash: true,
+      affectsReport: false,
+      affectsDebt: true,
+      excludeFromReports: true,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    transaction.update(accRef(uid, account.id), {
+      currentBalance: increment(delta),
+      calculatedBalance: increment(delta),
+      updatedAt: serverTimestamp(),
+    });
+    transaction.set(auditDoc, { action: 'register_debt_payment_with_money_movement', debtId: debt.id, transactionId: tx.id, amount: applied, delta, createdAt: serverTimestamp() });
   });
 
-  batch.set(tx, {
-    type,
-    amount: applied,
-    currency: 'COP',
-    category: isReceivable ? 'Pago deuda recibida' : 'Pago deuda pagada',
-    accountId: account.id,
-    accountName: account.name,
-    description,
-    date: Timestamp.fromDate(new Date()),
-    rawText: description,
-    source: 'manual',
-    confidence: 1,
-    debtId: debt.id,
-    debtMovementKind: isReceivable ? 'debt_payment_in' : 'debt_payment_out',
-    movementKind,
-    affectsCash: true,
-    affectsReport: false,
-    affectsDebt: true,
-    excludeFromReports: true,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-
-  batch.update(accRef(uid, account.id), {
-    currentBalance: increment(delta),
-    calculatedBalance: increment(delta),
-    updatedAt: serverTimestamp(),
-  });
-  batch.set(doc(auditCol(uid)), { action: 'register_debt_payment_with_money_movement', debtId: debt.id, transactionId: tx.id, amount: applied, delta, createdAt: serverTimestamp() });
-
-  await batch.commit();
   return tx;
 }
 

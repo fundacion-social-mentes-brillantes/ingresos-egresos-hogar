@@ -6,20 +6,21 @@ import { getAccounts } from '../lib/firestore';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { createAccountingTransaction, genericReversalBlockReason, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
 import { inferMovementKind, isProtectedTransaction, isReportableFinancialTransaction, parseCurrencyInput, toMoney } from '../lib/accounting';
+import { asDate, formDateTimeFromDate, nowTimeStr, todayStr } from '../lib/dateForm';
 import { CATEGORIES, formatCOP } from '../types';
 import type { Account, Transaction, TransactionType } from '../types';
 
 type FormState = { type: TransactionType; amount: string; category: string; accountId: string; description: string; date: string; time: string };
 
-const pad = (n: number) => String(n).padStart(2, '0');
-const today = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
-const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-const asDate = (date: string, time: string) => { const d = new Date(`${date || today()}T${time || '12:00'}:00`); return Number.isNaN(d.getTime()) ? new Date() : d; };
-const blank = (accounts: Account[]): FormState => ({ type: 'expense', amount: '', category: 'Otros', accountId: accounts[0]?.id || '', description: '', date: today(), time: nowTime() });
+const blank = (accounts: Account[]): FormState => ({ type: 'expense', amount: '', category: 'Otros', accountId: accounts[0]?.id || '', description: '', date: todayStr(), time: nowTimeStr() });
 const isTransfer = (tx: Transaction | null) => Boolean(tx?.transferId) || (tx ? inferMovementKind(tx).startsWith('transfer') : false);
 
 function formFromTx(tx: Transaction, accounts: Account[]): FormState {
-  return { type: tx.type, amount: String(tx.amount), category: tx.category || (tx.type === 'income' ? 'Ingreso' : 'Otros'), accountId: tx.accountId || accounts[0]?.id || '', description: tx.description || '', date: today(), time: nowTime() };
+  // Conservamos la fecha/hora original del movimiento. Antes se reseteaba a hoy,
+  // de modo que corregir un gasto de un mes pasado lo movia al mes actual y
+  // distorsionaba los reportes mensuales (lo sacaba de su mes real).
+  const { date, time } = formDateTimeFromDate(tx.date);
+  return { type: tx.type, amount: String(tx.amount), category: tx.category || (tx.type === 'income' ? 'Ingreso' : 'Otros'), accountId: tx.accountId || accounts[0]?.id || '', description: tx.description || '', date, time };
 }
 
 function label(tx: Transaction) {

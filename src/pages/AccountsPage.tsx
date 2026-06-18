@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTransactions } from '../hooks/useTransactions';
+import { getAllTransactions } from '../lib/firestore';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { confirmRealBalance } from '../lib/accountingOperations';
 import { buildAccountingLedger, parseCurrencyInput } from '../lib/accounting';
 import { formatCOP } from '../types';
+import type { Transaction } from '../types';
 import { AccountBrandMark } from '../components/visual/AccountBrandMark';
 import { EmptyState } from '../components/visual/EmptyState';
 import { Button } from '../components/ui/Button';
@@ -14,7 +16,16 @@ import clsx from 'clsx';
 
 export function AccountsPage() {
   const { user } = useAuth();
-  const { transactions, accounts, loading, refresh } = useTransactions();
+  const { accounts, loading, refresh } = useTransactions();
+  // El cuadre/conciliacion DEBE calcularse sobre el historial completo, no sobre
+  // los ultimos 500 movimientos del listener: con un set truncado el saldo
+  // calculado salia bajo y mostraba descuadres que no existian.
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const loadAllTransactions = useCallback(async () => {
+    if (!user) { setTransactions([]); return; }
+    setTransactions(await getAllTransactions(user.uid));
+  }, [user]);
+  useEffect(() => { loadAllTransactions().catch((error) => console.error('No pude cargar el historial completo de movimientos', error)); }, [loadAllTransactions]);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [showTransferForm, setShowTransferForm] = useState(false);
   const [transferFrom, setTransferFrom] = useState('');
@@ -62,6 +73,7 @@ export function AccountsPage() {
       setTransferAmount('');
       setTransferDescription('Transferencia entre cuentas');
       await refresh();
+      await loadAllTransactions();
     } catch (error: any) {
       setTransferError(error?.message || 'No pude hacer la transferencia.');
     } finally {
@@ -79,6 +91,7 @@ export function AccountsPage() {
       setReconcileMessage(result.estado === 'cuadra' ? 'Saldo real confirmado: la cuenta cuadra.' : `Saldo real confirmado: descuadre de ${formatCOP(Math.abs(result.diferencia))}.`);
       setRealBalanceInput('');
       await refresh();
+      await loadAllTransactions();
     } catch (error: any) {
       setReconcileMessage(error?.message || 'No pude confirmar el saldo real.');
     } finally {

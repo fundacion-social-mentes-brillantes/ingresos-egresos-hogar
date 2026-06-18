@@ -1,14 +1,26 @@
-import { useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useAuth } from '../contexts/AuthContext';
 import { useTransactions } from '../hooks/useTransactions';
 import { useDebts } from '../hooks/useDebts';
+import { getAllTransactions } from '../lib/firestore';
 import { buildMonthlyReport, exportFinanceWorkbook } from '../lib/reporting';
 import { formatCOP } from '../types';
+import type { Transaction } from '../types';
 import { EmptyState } from '../components/visual/EmptyState';
 import { AlertTriangle, Download, FileSpreadsheet, Lightbulb, PieChart, TrendingDown, TrendingUp, WalletCards } from 'lucide-react';
 
 export function ReportsPage() {
-  const { transactions, accounts, loading } = useTransactions();
+  const { user } = useAuth();
+  const { accounts, loading } = useTransactions();
   const { debts, summary: debtSummary } = useDebts();
+  // El reporte y el Excel usan el historial COMPLETO; con el listener de 500 el
+  // Excel salia incompleto y el "saldo calculado global" quedaba mal.
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const loadAllTransactions = useCallback(async () => {
+    if (!user) { setTransactions([]); return; }
+    setTransactions(await getAllTransactions(user.uid));
+  }, [user]);
+  useEffect(() => { loadAllTransactions().catch((error) => console.error('No pude cargar el historial completo para el reporte', error)); }, [loadAllTransactions]);
   const report = useMemo(() => buildMonthlyReport(transactions, debts), [transactions, debts]);
   const categories = Object.entries(report.byCategory).sort((a, b) => b[1] - a[1]).slice(0, 6);
 

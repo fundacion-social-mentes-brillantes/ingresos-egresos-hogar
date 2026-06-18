@@ -190,7 +190,14 @@ function emptyAccountSummary(account: Account): AccountAccountingSummary {
   return { accountId: account.id, accountName: account.name, saldoInicial, saldoFisicoCalculado: saldoInicial, saldoRealIngresado: real.amount, saldoRealConfirmado: real.confirmed, diferenciaConciliacion: reconciliation.diferencia, ingresosFisicos: 0, ingresosReportables: 0, ingresosHistoricosNoReportables: 0, gastosFisicosTotales: 0, salidasFisicasTotales: 0, gastosReportablesOPresentes: 0, gastosHistoricosNoReportables: 0, transferenciasEntrantes: 0, transferenciasSalientes: 0, prestamosOtorgados: 0, prestamosCobrados: 0, prestamosRecibidos: 0, abonosADeudasPorCobrar: 0, abonosADeudasPorPagar: 0, gastosPendientesCreados: 0, gastosPendientesPagados: 0, pagosInteresOMora: 0, ajustesConciliacion: 0, movimientosProtegidos: 0, movimientosLegacy: 0, txCount: 0, estado: reconciliation.estado };
 }
 
-function transactionBelongsToAccount(tx: Transaction, account: Account): boolean { return tx.accountId === account.id || normalizeText(tx.accountName) === normalizeText(account.name); }
+function transactionBelongsToAccount(tx: Transaction, account: Account): boolean {
+  // Cuando el movimiento tiene accountId real, ese es el unico criterio valido:
+  // emparejar por nombre podia atribuir (y duplicar) un movimiento a dos cuentas
+  // con nombres parecidos o tras renombrar una cuenta. El nombre solo se usa como
+  // respaldo para datos legacy que no guardaron accountId.
+  if (tx.accountId) return tx.accountId === account.id;
+  return normalizeText(tx.accountName) === normalizeText(account.name);
+}
 
 function addTransactionToSummary(summary: AccountAccountingSummary, tx: TransactionWithAccounting) {
   const amount = toMoney(tx.amount);
