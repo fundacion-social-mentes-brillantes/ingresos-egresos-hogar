@@ -47,8 +47,11 @@ export function parseSafeChatAmount(value: unknown): number {
     if (!match) throw new Error(`Valor de dinero invalido: ${raw}`);
     const base = parseSafeCOP(match[1]);
     const scale = match[2] || '';
-    if (scale.startsWith('mil') || scale.startsWith('luca') || scale === 'k') return base * 1000;
+    // OJO con el orden: 'millones'.startsWith('mil') === true, asi que la rama
+    // de millones DEBE evaluarse primero o "2 millones" se registraria como 2.000
+    // (error de factor 1000x). Por eso millon va antes que mil.
     if (scale.startsWith('millon')) return base * 1000000;
+    if (scale.startsWith('mil') || scale.startsWith('luca') || scale === 'k') return base * 1000;
     return base;
   }
 }

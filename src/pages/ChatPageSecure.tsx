@@ -70,7 +70,9 @@ function isCancelText(message: string): boolean {
 
 function looksLikeDeleteRequest(message: string): boolean {
   const text = normalizeText(message);
-  return ['borra', 'borrar', 'elimina', 'eliminar', 'quita', 'quitar', 'anula', 'anular'].some((word) => text.includes(word));
+  // Palabras completas (\b), no subcadenas: antes "me quitaron 30 mil" disparaba
+  // el flujo de borrado por contener "quita". normalizeText ya quito acentos.
+  return /\b(borra|borrar|borralo|borrala|elimina|eliminar|eliminalo|eliminala|quita|quitar|quitalo|quitala|anula|anular|analo)\b/.test(text);
 }
 
 function hasAmountValue(value: number | string | null | undefined): boolean {
@@ -213,7 +215,9 @@ async function callDeepSeek(payload: Record<string, unknown>, token: string): Pr
 }
 
 async function findTransaction(uid: string, action: BotActionPro, message: string): Promise<Transaction | null> {
-  const transactions = await getTransactions(uid, 100);
+  // No se debe reversar un movimiento ya reversado ni un asiento de reverso:
+  // se excluyen para no proponer/ejecutar acciones sobre ellos.
+  const transactions = (await getTransactions(uid, 100)).filter((tx) => !tx.isReversed && !tx.reversalOf);
   const target = action.deleteTarget || action.updateTarget || {};
   const hasTargetAmount = hasAmountValue(target.amount);
   const amount = hasTargetAmount ? parseRequiredBotAmount(target.amount) : 0;
@@ -261,7 +265,10 @@ async function buildPendingAction(uid: string, action: BotActionPro, message: st
     if (!debt) return null;
     const account = resolveAccount(accounts, message, action.debtPayment?.accountName);
     if (!account) throw new Error(`Para registrar el abono necesito la cuenta exacta. Cuentas disponibles: ${accountOptionsText(accounts)}.`);
-    const amount = action.intent === 'close_debt' ? debtRemaining(debt) : parseRequiredBotAmount(action.debtPayment?.amount);
+    const requested = action.intent === 'close_debt' ? debtRemaining(debt) : parseRequiredBotAmount(action.debtPayment?.amount);
+    // Mostramos el monto REALMENTE aplicado (no puede superar lo pendiente), que
+    // es lo que movera la cuenta; antes el texto podia prometer mas de lo movido.
+    const amount = Math.min(debtRemaining(debt), requested);
     return { id: crypto.randomUUID(), intent: action.intent as DangerousIntent, botAction: action, message, target: debt, account, summaryText: `Registrar ${action.intent === 'close_debt' ? 'pago total' : 'abono'} de ${formatCOP(amount)} en la deuda con ${debt.personName}, usando ${account.name}.` };
   }
   return null;

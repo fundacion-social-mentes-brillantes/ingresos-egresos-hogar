@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Loader2, Pencil, Plus, Search, ShieldCheck, Trash2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTransactions } from '../hooks/useTransactions';
-import { getAccounts } from '../lib/firestore';
+import { deleteTransaction, getAccounts } from '../lib/firestore';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { createAccountingTransaction, genericReversalBlockReason, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
 import { inferMovementKind, isProtectedTransaction, isReportableFinancialTransaction, parseCurrencyInput, toMoney } from '../lib/accounting';
@@ -119,7 +119,7 @@ export function TransactionsPage() {
     setBusy(tx.id);
     try {
       if (isTransfer(tx) && tx.transferId) await reverseTransfer(user.uid, tx.transferId, 'Quitar desde Movimientos');
-      else await reverseAccountingTransaction(user.uid, tx.id, 'Quitar desde Movimientos');
+      else await deleteTransaction(user.uid, tx.id); // archiva en papelera (recuperable) y luego reversa
       await refresh(); await loadAccounts();
     } catch (err: any) { setError(err?.message || 'No pude quitar el movimiento.'); }
     finally { setBusy(null); }

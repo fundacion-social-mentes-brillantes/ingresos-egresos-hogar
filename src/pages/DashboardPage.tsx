@@ -1,6 +1,10 @@
+import { useEffect, useState } from 'react';
+import { useAuth } from '../contexts/AuthContext';
 import { useTransactions, useFinancialSummary, useLast7Days } from '../hooks/useTransactions';
+import { getTransactionsByRange } from '../lib/firestore';
 import { StatCard } from '../components/ui/Card';
 import { formatCOP } from '../types';
+import type { Transaction } from '../types';
 import { useUserProfile } from '../hooks/useUserProfile';
 import { useDebts } from '../hooks/useDebts';
 import { ChatPage } from './ChatPagePro';
@@ -10,14 +14,29 @@ import {
   TrendingUp, TrendingDown, Wallet, Activity,
   Tag, Calendar, Loader2, Info, HandCoins, AlertTriangle, Sparkles, ArrowUpRight
 } from 'lucide-react';
-import { format } from 'date-fns';
+import { format, startOfMonth, endOfMonth, startOfDay, subDays } from 'date-fns';
 import { es } from 'date-fns/locale';
 
 export function DashboardPage() {
+  const { user } = useAuth();
   const { displayName } = useUserProfile();
   const { transactions, accounts, loading } = useTransactions();
-  const summary = useFinancialSummary(transactions);
-  const last7 = useLast7Days(transactions);
+  // El resumen del mes y los ultimos 7 dias se calculan sobre una consulta
+  // acotada por fecha (completa), no sobre el listener truncado a 500: con mas
+  // de 500 movimientos historicos el balance del mes salia incompleto.
+  const [periodTx, setPeriodTx] = useState<Transaction[]>([]);
+  useEffect(() => {
+    if (!user) { setPeriodTx([]); return; }
+    const now = new Date();
+    const monthStart = startOfMonth(now);
+    const last7Start = subDays(startOfDay(now), 6);
+    const start = monthStart.getTime() < last7Start.getTime() ? monthStart : last7Start;
+    getTransactionsByRange(user.uid, start, endOfMonth(now))
+      .then(setPeriodTx)
+      .catch((error) => console.error('No pude cargar el periodo para el dashboard', error));
+  }, [user]);
+  const summary = useFinancialSummary(periodTx);
+  const last7 = useLast7Days(periodTx);
   const { debts, summary: debtSummary } = useDebts();
   const last7Total = last7.reduce((sum, tx) => sum + tx.amount, 0);
 

@@ -4,7 +4,7 @@ import { useTransactions } from '../hooks/useTransactions';
 import { getAllTransactions } from '../lib/firestore';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { confirmRealBalance } from '../lib/accountingOperations';
-import { buildAccountingLedger, parseCurrencyInput } from '../lib/accounting';
+import { buildAccountingLedger, parseCurrencyInput, transactionBelongsToAccount } from '../lib/accounting';
 import { formatCOP } from '../types';
 import type { Transaction } from '../types';
 import { AccountBrandMark } from '../components/visual/AccountBrandMark';
@@ -49,7 +49,7 @@ export function AccountsPage() {
   const selectedTransactions = useMemo(() => {
     if (!selectedAccount) return [];
     return transactions
-      .filter((tx) => tx.accountId === selectedAccount.id || tx.accountName === selectedAccount.name)
+      .filter((tx) => transactionBelongsToAccount(tx, selectedAccount))
       .sort((a, b) => b.date.getTime() - a.date.getTime());
   }, [transactions, selectedAccount]);
 

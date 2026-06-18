@@ -250,13 +250,30 @@ export async function getAllTransactions(uid: string): Promise<Transaction[]> {
 // commit por fila (que dejaba importaciones a medias si algo fallaba y permitia
 // duplicar al re-confirmar), escribe los movimientos y ajusta el saldo de cada
 // cuenta en lotes de hasta 400 operaciones. Cada chunk entra completo o no entra.
+// Firma determinista del contenido del archivo (cuenta+tipo+monto+fecha+desc por
+// fila). Permite detectar que el MISMO archivo ya se importo aunque sea en otra
+// sesion o dispositivo, y bloquear la re-importacion que duplicaria el dinero.
+function hashFileImport(rows: Array<{ accountId?: string; type?: string; amount: number; date: unknown; description?: string }>): string {
+  const canon = rows
+    .map((d) => `${d.accountId}|${d.type}|${d.amount}|${(d.date instanceof Date ? d.date : toDate(d.date)).getTime()}|${d.description || ''}`)
+    .join('\n');
+  let h = 5381;
+  for (let i = 0; i < canon.length; i += 1) h = ((h << 5) + h + canon.charCodeAt(i)) | 0;
+  return `imp_${(h >>> 0).toString(36)}_${rows.length}`;
+}
+
 export async function createFileImportTransactions(uid: string, drafts: LegacyTransactionInput[]) {
   const valid = drafts
     .map((draft) => ({ ...draft, amount: toMoney(draft.amount) }))
     .filter((draft) => draft.accountId && draft.amount > 0 && (draft.type === 'income' || draft.type === 'expense'));
   if (valid.length === 0) throw new Error('No hay movimientos validos para importar.');
 
-  const fileImportId = doc(txCol(uid)).id;
+  const fileImportId = hashFileImport(valid);
+  // Anti-duplicado entre sesiones: si ya existe un movimiento con esta firma,
+  // este archivo ya se importo. No se vuelve a guardar.
+  const yaImportado = await getDocs(query(txCol(uid), where('fileImportId', '==', fileImportId), limit(1)));
+  if (!yaImportado.empty) throw new Error('Estos mismos movimientos ya fueron importados antes desde un archivo. No se volvieron a guardar para no duplicar el dinero.');
+
   const chunkSize = 400;
   let saved = 0;
 
@@ -299,7 +316,14 @@ export async function createFileImportTransactions(uid: string, drafts: LegacyTr
     });
     batch.set(doc(actionLogCol(uid)), cleanUndefinedFields({ action: 'import_excel_file', entityType: 'transaction', description: `Importacion de archivo: ${chunk.length} movimientos`, after: { fileImportId, count: chunk.length }, source: 'manual', status: 'executed', createdAt: serverTimestamp() }));
 
-    await batch.commit();
+    try {
+      await batch.commit();
+    } catch (error) {
+      // Para archivos grandes (multiples chunks) un chunk previo pudo entrar.
+      // Avisamos con cuanto se guardo para que el usuario no reimporte a ciegas.
+      if (saved > 0) throw new Error(`Se alcanzaron a guardar ${saved} de ${valid.length} movimientos y luego fallo (red o permisos). Revisa el saldo de la cuenta antes de reintentar para no duplicar.`);
+      throw error;
+    }
     saved += chunk.length;
   }
 

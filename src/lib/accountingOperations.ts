@@ -60,11 +60,24 @@ async function getTransaction(uid: string, id: string): Promise<Transaction> {
 }
 
 async function getTransactionsForAccount(uid: string, account: Account): Promise<Transaction[]> {
-  const byId = await getDocs(query(txCol(uid), where('accountId', '==', account.id)));
-  return byId.docs.map((item) => {
+  // Trae por accountId Y por accountName, igual que la atribucion del motor
+  // (summarizeAccount->transactionBelongsToAccount). Antes solo consultaba por
+  // accountId, asi que la conciliacion ignoraba movimientos legacy guardados sin
+  // accountId (solo nombre) que la pantalla Cuentas SI cuenta -> el saldo
+  // calculado/diferencia que se persistia no coincidia con lo que el usuario vio.
+  const [byId, byName] = await Promise.all([
+    getDocs(query(txCol(uid), where('accountId', '==', account.id))),
+    getDocs(query(txCol(uid), where('accountName', '==', account.name))),
+  ]);
+  const map = new Map<string, Transaction>();
+  for (const item of [...byId.docs, ...byName.docs]) {
     const data = item.data() as Record<string, any>;
-    return { id: item.id, ...data, amount: toMoney(data.amount), date: toDate(data.date), createdAt: toDate(data.createdAt), updatedAt: toDate(data.updatedAt) } as Transaction;
-  });
+    map.set(item.id, { id: item.id, ...data, amount: toMoney(data.amount), date: toDate(data.date), createdAt: toDate(data.createdAt), updatedAt: toDate(data.updatedAt) } as Transaction);
+  }
+  // summarizeAccount vuelve a filtrar con transactionBelongsToAccount (prioriza
+  // accountId), asi que un tx con accountId de OTRA cuenta pero mismo nombre
+  // (cuenta renombrada) queda correctamente excluido.
+  return [...map.values()];
 }
 
 function cashDelta(tx: Partial<Transaction> & { amount: number; type: TransactionType }): number {
@@ -164,42 +177,50 @@ export async function createAccountingTransaction(uid: string, input: {
 }
 
 export async function reverseAccountingTransaction(uid: string, transactionId: string, reason = 'Anulacion contable') {
-  const original = await getTransaction(uid, transactionId);
-  const blockReason = genericReversalBlockReason(original);
-  if (blockReason) throw new Error(blockReason);
-  if (isProtectedTransaction(original)) throw new Error('Movimiento protegido: usa su flujo especifico para conservar la contabilidad.');
-  const amount = toMoney(original.amount);
-  const reverseType: TransactionType = original.type === 'income' ? 'expense' : 'income';
   const reverseRef = doc(txCol(uid));
-  const reversePayload = {
-    type: reverseType,
-    amount,
-    currency: 'COP' as const,
-    category: 'Reverso contable',
-    accountId: original.accountId,
-    accountName: original.accountName,
-    description: `Reverso de: ${original.description}`,
-    date: serverTimestamp(),
-    rawText: reason,
-    source: 'manual' as const,
-    confidence: 1,
-    movementKind: 'reconciliation_adjustment' as const,
-    affectsCash: affectsCash(original),
-    affectsReport: false,
-    affectsDebt: false,
-    excludeFromReports: true,
-    reversalOf: original.id,
-    reversalReason: reason,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  };
-  const delta = affectsCash(original) ? (original.type === 'income' ? -amount : amount) : 0;
-  const batch = writeBatch(db);
-  batch.update(txRef(uid, original.id), { isReversed: true, reversedAt: serverTimestamp(), reversalReason: reason, updatedAt: serverTimestamp() });
-  batch.set(reverseRef, reversePayload);
-  if (delta !== 0 && original.accountId) batch.update(accRef(uid, original.accountId), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
-  batch.set(doc(auditCol(uid)), { action: 'reverse_transaction', transactionId: original.id, reverseTransactionId: reverseRef.id, reason, delta, createdAt: serverTimestamp() });
-  await batch.commit();
+  const auditDoc = doc(auditCol(uid));
+  // runTransaction (no writeBatch): leemos el original DENTRO de la transaccion
+  // y revalidamos isReversed ahi mismo. Asi un doble reverso concurrente (doble
+  // clic, dos dispositivos, reintento por red) ve isReversed=true y aborta, en
+  // vez de aplicar el increment dos veces y descuadrar el saldo.
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(txRef(uid, transactionId));
+    if (!snap.exists()) throw new Error('El movimiento no existe.');
+    const data = snap.data() as Record<string, any>;
+    const original = { id: snap.id, ...data, amount: toMoney(data.amount) } as Transaction;
+    const blockReason = genericReversalBlockReason(original);
+    if (blockReason) throw new Error(blockReason);
+    if (isProtectedTransaction(original)) throw new Error('Movimiento protegido: usa su flujo especifico para conservar la contabilidad.');
+    const amount = toMoney(original.amount);
+    const reverseType: TransactionType = original.type === 'income' ? 'expense' : 'income';
+    const reversePayload = {
+      type: reverseType,
+      amount,
+      currency: 'COP' as const,
+      category: 'Reverso contable',
+      accountId: original.accountId,
+      accountName: original.accountName,
+      description: `Reverso de: ${original.description}`,
+      date: serverTimestamp(),
+      rawText: reason,
+      source: 'manual' as const,
+      confidence: 1,
+      movementKind: 'reconciliation_adjustment' as const,
+      affectsCash: affectsCash(original),
+      affectsReport: false,
+      affectsDebt: false,
+      excludeFromReports: true,
+      reversalOf: original.id,
+      reversalReason: reason,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+    const delta = affectsCash(original) ? (original.type === 'income' ? -amount : amount) : 0;
+    transaction.update(txRef(uid, original.id), { isReversed: true, reversedAt: serverTimestamp(), reversalReason: reason, updatedAt: serverTimestamp() });
+    transaction.set(reverseRef, reversePayload);
+    if (delta !== 0 && original.accountId) transaction.update(accRef(uid, original.accountId), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
+    transaction.set(auditDoc, { action: 'reverse_transaction', transactionId: original.id, reverseTransactionId: reverseRef.id, reason, delta, createdAt: serverTimestamp() });
+  });
   return reverseRef;
 }
 

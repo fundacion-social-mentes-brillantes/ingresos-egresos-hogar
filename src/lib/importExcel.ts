@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 import type { Account, TransactionType } from '../types';
+import { parseCurrencyInput } from './accounting';
 
 export interface ImportedTransactionDraft {
   type: TransactionType;
@@ -44,17 +45,24 @@ function headerIncludes(header: string, candidates: string[]) {
   return candidates.some((candidate) => normalized.includes(normalize(candidate)));
 }
 
-function parseAmount(value: unknown): number {
-  if (typeof value === 'number') return Math.abs(value);
-  const cleaned = String(value || '')
-    .replace(/[^\d,.-]/g, '')
-    .replace(/\.(?=\d{3}(\D|$))/g, '')
-    .replace(',', '.');
-  const parsed = Number.parseFloat(cleaned);
-  return Number.isFinite(parsed) ? Math.abs(parsed) : 0;
+// Parseo de montos en pesos COP enteros. Antes esta funcion trataba la coma
+// como decimal y solo quitaba puntos de miles: "1,250,000" salia 1, "45,000"
+// salia 45 (perdida silenciosa de factor 1000x en exports con coma de miles o
+// formato US). Ahora reusa el parser canonico parseCurrencyInput (mismo que el
+// resto de la app), y solo si este lo considera ambiguo cae a "solo digitos".
+export function parseAmount(value: unknown): number {
+  if (typeof value === 'number') return Math.abs(Math.round(value));
+  const text = String(value || '').trim();
+  if (!text) return 0;
+  try {
+    return parseCurrencyInput(text);
+  } catch {
+    const digits = text.replace(/[^0-9]/g, '');
+    return digits ? Number(digits) : 0;
+  }
 }
 
-function parseSignedAmount(value: unknown): number {
+export function parseSignedAmount(value: unknown): number {
   if (typeof value === 'number') return value;
   const text = String(value || '').trim();
   const negative = text.includes('-') || text.startsWith('(');
@@ -70,25 +78,29 @@ function excelSerialDateToDate(value: number): Date | null {
   return new Date(dateInfo.getUTCFullYear(), dateInfo.getUTCMonth(), dateInfo.getUTCDate(), 12, 0, 0);
 }
 
-function parseDate(value: unknown): Date {
-  if (value instanceof Date) return value;
+// Devuelve null cuando HAY un texto de fecha pero no se entiende, para que la
+// fila se marque como dudosa en vez de quedar silenciosamente con la fecha de
+// HOY (lo que metia un gasto antiguo en el mes en curso y distorsionaba el
+// reporte). Si no hay fecha (celda/columna vacia) si se asume hoy a proposito.
+export function parseDate(value: unknown): Date | null {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
   if (typeof value === 'number') {
     const excelDate = excelSerialDateToDate(value);
     if (excelDate) return excelDate;
   }
   const text = String(value || '').trim();
   if (!text) return new Date();
-  const parsed = new Date(text);
-  if (!Number.isNaN(parsed.getTime())) return parsed;
-
   const slash = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
   if (slash) {
     const day = Number(slash[1]);
     const month = Number(slash[2]) - 1;
     const year = Number(slash[3].length === 2 ? `20${slash[3]}` : slash[3]);
-    return new Date(year, month, day, 12, 0, 0);
+    const d = new Date(year, month, day, 12, 0, 0);
+    return Number.isNaN(d.getTime()) ? null : d;
   }
-  return new Date();
+  const parsed = new Date(text);
+  if (!Number.isNaN(parsed.getTime())) return parsed;
+  return null;
 }
 
 function inferCategory(description: string, type: TransactionType): string {
@@ -263,6 +275,12 @@ function buildDraftsFromRows(rows: RowData[], accounts: Account[]): ImportPrevie
       return;
     }
 
+    const date = parseDate(dateHeader ? row[dateHeader] : '');
+    if (!date) {
+      skipped.push(`Fila ${index + 2}: no entendi la fecha "${String(row[dateHeader as string] ?? '')}". Revisala (usa dd/mm/aaaa) y reintenta.`);
+      return;
+    }
+
     const explicitCategory = categoryHeader ? String(row[categoryHeader] || '').trim() : '';
     drafts.push({
       type,
@@ -272,7 +290,7 @@ function buildDraftsFromRows(rows: RowData[], accounts: Account[]): ImportPrevie
       accountId: account.id,
       accountName: account.name,
       description,
-      date: parseDate(dateHeader ? row[dateHeader] : ''),
+      date,
       rawText: JSON.stringify(row),
       source: 'manual',
       confidence: 0.85,

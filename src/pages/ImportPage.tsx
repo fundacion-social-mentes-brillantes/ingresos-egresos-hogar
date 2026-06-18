@@ -153,7 +153,7 @@ export function ImportPage() {
       setPreview(null);
       setFileName('');
     } catch (err: any) {
-      setError(err?.message || 'No pude guardar los movimientos. Si fallo a mitad, ningun bloque quedo a medias.');
+      setError(err?.message || 'No pude guardar los movimientos.');
     } finally {
       setSaving(false);
     }

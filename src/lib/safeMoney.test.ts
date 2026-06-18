@@ -29,6 +29,16 @@ describe('parseSafeChatAmount', () => {
     expect(parseSafeChatAmount('gaste 45 mil en mercado')).toBe(45_000);
   });
 
+  it('escala mil/lucas/k y millones con el factor correcto (regresion del bug 1000x)', () => {
+    expect(parseSafeChatAmount('45 mil')).toBe(45_000);
+    expect(parseSafeChatAmount('3 lucas')).toBe(3_000);
+    expect(parseSafeChatAmount('5k')).toBe(5_000);
+    // El bug: "millones" entraba a la rama de "mil" (x1000) -> registraba 1000x menos.
+    expect(parseSafeChatAmount('2 millones')).toBe(2_000_000);
+    expect(parseSafeChatAmount('1 millon')).toBe(1_000_000);
+    expect(parseSafeChatAmount('me prestaron 2 millones para el carro')).toBe(2_000_000);
+  });
+
   it('rejects invalid, negative or ambiguous chat money', () => {
     expect(() => parseSafeChatAmount('45,50')).toThrow();
     expect(() => parseSafeChatAmount('abc')).toThrow();
