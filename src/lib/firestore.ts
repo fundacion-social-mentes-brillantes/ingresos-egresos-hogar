@@ -28,6 +28,7 @@ import type {
   Transaction,
   Account,
   ChatMessage,
+  ChatThread,
   AppSettings,
   UserProfile,
   Debt,
@@ -473,6 +474,56 @@ export async function getChatMessages(uid: string, limitCount = 50): Promise<Cha
 
 export async function addChatMessage(uid: string, data: Omit<ChatMessage, 'id' | 'createdAt'>) {
   return addDoc(chatCol(uid), cleanUndefinedFields({ ...data, createdAt: serverTimestamp() }));
+}
+
+// -- Chat conversations (hilos tipo ChatGPT/Claude) --------------------------
+// La lista de conversaciones se guarda en un doc de settings (que ya tiene
+// permisos), evitando una coleccion nueva que requeriria cambiar reglas.
+const chatThreadsRef = (uid: string) => doc(db, 'users', uid, 'settings', 'chatThreads');
+
+export async function getChatThreads(uid: string): Promise<{ threads: ChatThread[]; activeId: string | null }> {
+  const snap = await getDoc(chatThreadsRef(uid));
+  if (!snap.exists()) return { threads: [], activeId: null };
+  const data = snap.data() as Record<string, unknown>;
+  const threads = (Array.isArray(data.threads) ? data.threads : []) as ChatThread[];
+  const activeId = (typeof data.activeId === 'string' ? data.activeId : null) ?? (threads[0]?.id ?? null);
+  return { threads, activeId };
+}
+
+export async function saveChatThreads(uid: string, value: { threads: ChatThread[]; activeId: string | null }) {
+  return setDoc(chatThreadsRef(uid), cleanUndefinedFields({ threads: value.threads, activeId: value.activeId, updatedAt: serverTimestamp() }), { merge: true });
+}
+
+// Asigna los mensajes antiguos (sin conversationId) al hilo indicado, para que
+// el historial previo a esta funcion no quede huerfano e invisible.
+export async function assignOrphanMessagesToThread(uid: string, conversationId: string) {
+  if (!conversationId) return;
+  const snap = await getDocs(query(chatCol(uid), limit(500)));
+  const orphans = snap.docs.filter((d) => !(d.data() as Record<string, unknown>).conversationId);
+  if (orphans.length === 0) return;
+  let batch = writeBatch(db);
+  let count = 0;
+  for (const docSnap of orphans) {
+    batch.update(docSnap.ref, { conversationId });
+    count += 1;
+    if (count % 450 === 0) { await batch.commit(); batch = writeBatch(db); }
+  }
+  await batch.commit();
+}
+
+// Borra todos los mensajes de una conversacion (en lotes para no pasar el limite).
+export async function deleteConversationMessages(uid: string, conversationId: string) {
+  if (!conversationId) return;
+  const snap = await getDocs(query(chatCol(uid), where('conversationId', '==', conversationId)));
+  if (snap.empty) return;
+  let batch = writeBatch(db);
+  let count = 0;
+  for (const docSnap of snap.docs) {
+    batch.delete(docSnap.ref);
+    count += 1;
+    if (count % 450 === 0) { await batch.commit(); batch = writeBatch(db); }
+  }
+  await batch.commit();
 }
 
 // -- Action logs -------------------------------------------------------------

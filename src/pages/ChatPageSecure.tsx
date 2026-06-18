@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
-import { AlertCircle, Bot, CheckCircle2, Loader2, Send, ShieldCheck } from 'lucide-react';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import { AlertCircle, Bot, CheckCircle2, Loader2, Pencil, Plus, Send, Trash2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { auth, db } from '../lib/firebase';
-import { addActionLog, addChatMessage, getAccounts, getDebts, getTransactions, getTransactionsByRange } from '../lib/firestore';
+import { addActionLog, addChatMessage, assignOrphanMessagesToThread, deleteConversationMessages, getAccounts, getChatThreads, getDebts, getTransactions, getTransactionsByRange, saveChatThreads } from '../lib/firestore';
 import { createAccountingTransaction, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { createDebtWithMoneyMovement, registerDebtPaymentWithMoneyMovement } from '../lib/debtMoney';
@@ -12,7 +12,7 @@ import { classifyChatAccountingTarget } from '../lib/chatAccountingSafety';
 import { parseSafeChatAmount } from '../lib/safeMoney';
 import { getAiMemory, memoryToContext, updateAiMemory } from '../lib/aiMemory';
 import { EmptyState } from '../components/visual/EmptyState';
-import type { Account, AiInsight, AiMemoryProfile, ChatMessage, Debt, DebtDirection, FinancialSummary, Transaction, TransactionType } from '../types';
+import type { Account, AiInsight, AiMemoryProfile, ChatMessage, ChatThread, Debt, DebtDirection, FinancialSummary, Transaction, TransactionType } from '../types';
 import { formatCOP } from '../types';
 
 type ChatPageProps = { embedded?: boolean };
@@ -344,8 +344,8 @@ function friendlyError(error: any): ChatErrorState {
   return { friendly: error?.message || 'No pude procesar el mensaje.', code, message: error?.message, details: error?.details ? JSON.stringify(error.details) : undefined };
 }
 
-async function runSafeChat(uid: string, message: string, currentMessages: ChatMessage[], token: string): Promise<PendingAction | null> {
-  await addChatMessage(uid, { text: message, sender: 'user' });
+async function runSafeChat(uid: string, message: string, currentMessages: ChatMessage[], token: string, conversationId: string): Promise<PendingAction | null> {
+  await addChatMessage(uid, { text: message, sender: 'user', conversationId });
   const { accounts, debts, summary, context } = await buildFinancialContext(uid);
   const memory = await getAiMemory(uid).catch(() => ({} as AiMemoryProfile));
   const action = await callDeepSeek({ message, context, diagnosticContext: context, aiMemory: memoryToContext(memory), chatHistory: currentMessages.slice(-20) }, token);
@@ -354,11 +354,11 @@ async function runSafeChat(uid: string, message: string, currentMessages: ChatMe
   if (['delete_transaction', 'update_transaction', 'register_debt_payment', 'close_debt'].includes(action.intent) || looksLikeDeleteRequest(message)) {
     const pending = await buildPendingAction(uid, action, message, accounts);
     if (!pending) {
-      await addChatMessage(uid, { text: 'Entendí que quieres modificar datos, pero no encontré un objetivo claro. Dime valor, persona, cuenta o movimiento exacto.', sender: 'bot' } as any);
+      await addChatMessage(uid, { text: 'Entendí que quieres modificar datos, pero no encontré un objetivo claro. Dime valor, persona, cuenta o movimiento exacto.', sender: 'bot', conversationId } as any);
       return null;
     }
     await addActionLog(uid, { action: pending.intent, entityType: pending.intent.includes('debt') || pending.intent === 'close_debt' ? 'debt' : 'transaction', entityId: pending.target?.id, description: `Pendiente de confirmación: ${pending.summaryText}`, before: pending.target, source: 'bot', status: 'pending' });
-    await addChatMessage(uid, { text: `Antes de tocar tus datos necesito confirmación. ${pending.summaryText}\n\nResponde “confirmo” para ejecutar o “cancelar” para no hacer nada.`, sender: 'bot', emotionalTone: 'alert', assistantMode: 'registro', riskLevel: 'medium', suggestedActions: ['Confirmar', 'Cancelar'] } as any);
+    await addChatMessage(uid, { text: `Antes de tocar tus datos necesito confirmación. ${pending.summaryText}\n\nResponde “confirmo” para ejecutar o “cancelar” para no hacer nada.`, sender: 'bot', conversationId, emotionalTone: 'alert', assistantMode: 'registro', riskLevel: 'medium', suggestedActions: ['Confirmar', 'Cancelar'] } as any);
     return pending;
   }
 
@@ -433,31 +433,124 @@ async function runSafeChat(uid: string, message: string, currentMessages: ChatMe
     replyToUser = action.replyToUser || `Este mes vas con ${formatCOP(summary.totalIncome)} en ingresos, ${formatCOP(summary.totalExpenses)} en gastos y balance de ${formatCOP(summary.balance)}.`;
   }
 
-  await addChatMessage(uid, { text: replyToUser, sender: 'bot', transactionId, debtId, summary: responseSummary, emotionalTone: action.emotionalTone || 'encouraging', suggestedNextQuestion: action.suggestedNextQuestion || '', assistantMode: action.assistantMode, riskLevel: action.riskLevel, insights: action.insights, suggestedActions: action.suggestedActions, intent: action.intent } as any);
+  await addChatMessage(uid, { text: replyToUser, sender: 'bot', conversationId, transactionId, debtId, summary: responseSummary, emotionalTone: action.emotionalTone || 'encouraging', suggestedNextQuestion: action.suggestedNextQuestion || '', assistantMode: action.assistantMode, riskLevel: action.riskLevel, insights: action.insights, suggestedActions: action.suggestedActions, intent: action.intent } as any);
   return null;
+}
+
+function newThreadId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `c_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
 export function ChatPage({ embedded = false }: ChatPageProps) {
   const { user } = useAuth();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [threads, setThreads] = useState<ChatThread[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [chatError, setChatError] = useState<ChatErrorState | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Cargar o inicializar las conversaciones del usuario.
   useEffect(() => {
-    if (!user) return;
-    const q = query(collection(db, `users/${user.uid}/chatMessages`), orderBy('createdAt', 'desc'), limit(50));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      setMessages(snapshot.docs.map((doc) => normalizeMessage(doc.id, doc.data())).reverse());
-    });
-    return () => unsubscribe();
+    if (!user) { setThreads([]); setActiveId(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const stored = await getChatThreads(user.uid);
+        if (cancelled) return;
+        if (stored.threads.length > 0) {
+          setThreads(stored.threads);
+          setActiveId(stored.activeId && stored.threads.some((t) => t.id === stored.activeId) ? stored.activeId : stored.threads[0].id);
+          return;
+        }
+        const first: ChatThread = { id: newThreadId(), title: 'Chat 1', createdAt: Date.now(), updatedAt: Date.now() };
+        setThreads([first]);
+        setActiveId(first.id);
+        await saveChatThreads(user.uid, { threads: [first], activeId: first.id });
+        // Conserva el historial previo (mensajes sin conversationId) en el primer chat.
+        await assignOrphanMessagesToThread(user.uid, first.id).catch(() => undefined);
+      } catch (error) {
+        if (cancelled) return;
+        console.error('No pude cargar las conversaciones', error);
+        const first: ChatThread = { id: newThreadId(), title: 'Chat 1', createdAt: Date.now(), updatedAt: Date.now() };
+        setThreads([first]);
+        setActiveId(first.id);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [user]);
+
+  // Mensajes de la conversacion activa (filtra por conversationId, orden en cliente).
+  useEffect(() => {
+    if (!user || !activeId) { setMessages([]); return; }
+    setPendingAction(null);
+    const q = query(collection(db, `users/${user.uid}/chatMessages`), where('conversationId', '==', activeId));
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const list = snapshot.docs.map((d) => normalizeMessage(d.id, d.data()));
+        list.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        setMessages(list);
+      },
+      (error) => console.error('Listener de mensajes fallo', error)
+    );
+    return () => unsubscribe();
+  }, [user, activeId]);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, pendingAction, loading]);
+
+  const activeThread = threads.find((t) => t.id === activeId) || null;
+
+  const persistThreads = async (next: ChatThread[], nextActive: string | null) => {
+    if (!user) return;
+    await saveChatThreads(user.uid, { threads: next, activeId: nextActive }).catch((error) => console.error('No pude guardar conversaciones', error));
+  };
+
+  const createThread = async () => {
+    if (!user) return;
+    const thread: ChatThread = { id: newThreadId(), title: `Chat ${threads.length + 1}`, createdAt: Date.now(), updatedAt: Date.now() };
+    const next = [thread, ...threads];
+    setThreads(next); setActiveId(thread.id); setMessages([]); setPendingAction(null); setChatError(null);
+    await persistThreads(next, thread.id);
+  };
+
+  const switchThread = async (id: string) => {
+    if (id === activeId) return;
+    setActiveId(id); setPendingAction(null); setChatError(null);
+    await persistThreads(threads, id);
+  };
+
+  const renameThread = async (id: string) => {
+    const current = threads.find((t) => t.id === id);
+    const title = window.prompt('Nombre del chat:', current?.title || '')?.trim();
+    if (!title) return;
+    const next = threads.map((t) => (t.id === id ? { ...t, title, updatedAt: Date.now() } : t));
+    setThreads(next);
+    await persistThreads(next, activeId);
+  };
+
+  const deleteThread = async (id: string) => {
+    if (!user) return;
+    if (!window.confirm('¿Borrar este chat y sus mensajes? No afecta tus movimientos, cuentas ni deudas.')) return;
+    const remaining = threads.filter((t) => t.id !== id);
+    let nextThreads = remaining;
+    let nextActive = activeId;
+    if (remaining.length === 0) {
+      const fresh: ChatThread = { id: newThreadId(), title: 'Chat 1', createdAt: Date.now(), updatedAt: Date.now() };
+      nextThreads = [fresh];
+      nextActive = fresh.id;
+    } else if (id === activeId) {
+      nextActive = remaining[0].id;
+    }
+    setThreads(nextThreads); setActiveId(nextActive); setPendingAction(null);
+    await persistThreads(nextThreads, nextActive);
+    await deleteConversationMessages(user.uid, id).catch((error) => console.error('No pude borrar los mensajes del chat', error));
+  };
 
   const token = async () => {
     const currentUser = auth.currentUser;
@@ -465,57 +558,79 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
     return currentUser.getIdToken();
   };
 
+  // Si el chat aun tiene nombre por defecto y es el primer mensaje, lo titula con el texto.
+  const maybeAutoTitle = async (firstMessage: string) => {
+    if (!activeThread || messages.length > 0) return;
+    const isDefault = /^chat \d+$/i.test(activeThread.title) || activeThread.title.toLowerCase() === 'nuevo chat';
+    if (!isDefault) return;
+    const title = firstMessage.replace(/\s+/g, ' ').trim().slice(0, 40);
+    if (!title) return;
+    const next = threads.map((t) => (t.id === activeThread.id ? { ...t, title, updatedAt: Date.now() } : t));
+    setThreads(next);
+    await persistThreads(next, activeId);
+  };
+
   const handleSubmit = async (event?: React.FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
-    if (!user || !input.trim() || loading) return;
+    if (!user || !input.trim() || loading || !activeId) return;
     const message = input.trim();
+    const conversationId = activeId;
     setInput('');
     setChatError(null);
     setLoading(true);
     try {
       if (pendingAction) {
-        await addChatMessage(user.uid, { text: message, sender: 'user' });
+        await addChatMessage(user.uid, { text: message, sender: 'user', conversationId });
         if (isCancelText(message)) {
-          await addChatMessage(user.uid, { text: 'Cancelado. No hice ningún cambio.', sender: 'bot' } as any);
+          await addChatMessage(user.uid, { text: 'Cancelado. No hice ningún cambio.', sender: 'bot', conversationId } as any);
           setPendingAction(null);
           return;
         }
         if (!isConfirmText(message)) {
-          await addChatMessage(user.uid, { text: 'Para ejecutar esa acción responde “confirmo” o “cancelar”.', sender: 'bot' } as any);
+          await addChatMessage(user.uid, { text: 'Para ejecutar esa acción responde “confirmo” o “cancelar”.', sender: 'bot', conversationId } as any);
           return;
         }
         const result = await executePendingAction(user.uid, pendingAction);
-        await addChatMessage(user.uid, { text: result, sender: 'bot' } as any);
+        await addChatMessage(user.uid, { text: result, sender: 'bot', conversationId } as any);
         setPendingAction(null);
         return;
       }
-      const pending = await runSafeChat(user.uid, message, messages, await token());
+      await maybeAutoTitle(message);
+      const pending = await runSafeChat(user.uid, message, messages, await token(), conversationId);
       if (pending) setPendingAction(pending);
     } catch (error: any) {
       setChatError(friendlyError(error));
-      await addChatMessage(user.uid, { text: error?.message || 'No pude procesar el mensaje.', sender: 'bot' } as any).catch(() => undefined);
+      await addChatMessage(user.uid, { text: error?.message || 'No pude procesar el mensaje.', sender: 'bot', conversationId } as any).catch(() => undefined);
     } finally {
       setLoading(false);
     }
   };
 
-  const containerClass = embedded ? 'flex h-full flex-col' : 'mx-auto flex min-h-[calc(100dvh-2rem)] w-full max-w-5xl flex-col gap-4 pb-8';
-  const messagesClass = embedded ? 'custom-scrollbar flex-1 overflow-y-auto p-4' : 'custom-scrollbar min-h-[60vh] flex-1 overflow-y-auto rounded-[1.75rem] border border-slate-700/40 bg-slate-950/30 p-4';
+  const containerClass = embedded
+    ? 'flex h-full flex-col gap-2'
+    : 'mx-auto flex h-[calc(100dvh-9rem)] w-full max-w-5xl flex-col gap-2 sm:h-[calc(100dvh-4.5rem)]';
+  const messagesClass = embedded
+    ? 'custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4'
+    : 'custom-scrollbar min-h-0 flex-1 overflow-y-auto rounded-[1.5rem] border border-slate-700/40 bg-slate-950/30 p-4';
 
   return (
     <div className={containerClass}>
-      {!embedded && (
-        <section className="lux-hero relative p-5 sm:p-7">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <p className="lux-kicker">Copiloto financiero seguro</p>
-              <h1 className="lux-heading mt-2 text-3xl sm:text-4xl">Chat financiero</h1>
-              <p className="lux-subtle mt-2 max-w-2xl text-sm">Registra solo con cuenta exacta, usa reversos contables y nunca borra historial.</p>
-            </div>
-            <div className="premium-icon h-14 w-14 text-green-200"><ShieldCheck className="h-7 w-7" /></div>
-          </div>
-        </section>
-      )}
+      {/* Barra de conversaciones (varios chats, crear / cambiar / renombrar / borrar) */}
+      <div className="flex shrink-0 items-center gap-2 rounded-2xl border border-slate-700/40 bg-slate-950/40 p-2">
+        <div className="custom-scrollbar flex flex-1 items-center gap-1.5 overflow-x-auto">
+          {threads.map((thread) => {
+            const active = thread.id === activeId;
+            return (
+              <div key={thread.id} className={`flex shrink-0 items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-bold transition ${active ? 'border-blue-400/40 bg-blue-500/15 text-blue-100' : 'border-slate-700/40 bg-slate-900/40 text-slate-300 hover:bg-slate-800/60'}`}>
+                <button type="button" onClick={() => switchThread(thread.id)} onDoubleClick={() => renameThread(thread.id)} className="max-w-[10rem] truncate" title={thread.title}>{thread.title}</button>
+                {active && <button type="button" onClick={() => renameThread(thread.id)} className="text-slate-400 hover:text-blue-200" title="Renombrar chat"><Pencil className="h-3 w-3" /></button>}
+                <button type="button" onClick={() => deleteThread(thread.id)} className="text-slate-500 hover:text-red-300" title="Borrar chat"><Trash2 className="h-3 w-3" /></button>
+              </div>
+            );
+          })}
+        </div>
+        <button type="button" onClick={createThread} className="premium-button inline-flex shrink-0 items-center gap-1 rounded-xl px-3 py-1.5 text-xs font-black"><Plus className="h-3.5 w-3.5" />Nuevo</button>
+      </div>
 
       <div className={messagesClass} ref={scrollRef}>
         {messages.length === 0 ? (
@@ -540,18 +655,18 @@ export function ChatPage({ embedded = false }: ChatPageProps) {
       </div>
 
       {chatError && (
-        <div className="rounded-2xl border border-red-500/25 bg-red-500/10 p-3 text-sm text-red-100">
+        <div className="shrink-0 rounded-2xl border border-red-500/25 bg-red-500/10 p-3 text-sm text-red-100">
           <div className="flex items-start gap-2"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span>{chatError.friendly}</span></div>
         </div>
       )}
 
       {pendingAction && (
-        <div className="rounded-2xl border border-amber-400/25 bg-amber-500/10 p-3 text-sm font-bold text-amber-100">
+        <div className="shrink-0 rounded-2xl border border-amber-400/25 bg-amber-500/10 p-3 text-sm font-bold text-amber-100">
           Acción pendiente: {pendingAction.summaryText} Responde “confirmo” o “cancelar”.
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="flex items-end gap-2 rounded-[1.5rem] border border-slate-700/40 bg-slate-950/60 p-3">
+      <form onSubmit={handleSubmit} className="flex shrink-0 items-end gap-2 rounded-[1.5rem] border border-slate-700/40 bg-slate-950/60 p-3">
         <textarea
           value={input}
           onChange={(event) => setInput(event.target.value)}

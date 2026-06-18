@@ -168,10 +168,18 @@ export interface AiMemoryProfile {
   lastUpdatedAt?: Date;
 }
 
+export interface ChatThread {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ChatMessage {
   id: string;
   text: string;
   sender: 'user' | 'bot';
+  conversationId?: string;
   createdAt: Date;
   suggestedNextQuestion?: string;
   emotionalTone?: string;
