@@ -2,7 +2,61 @@ declare const process: {
   env: Record<string, string | undefined>;
 };
 
-import { parseSafeChatAmount } from '../src/lib/safeMoney';
+// Esta funcion serverless debe ser AUTOCONTENIDA: importar desde ../src/lib/*
+// rompia el bundle de Vercel en runtime (Error ERR_MODULE_NOT_FOUND -> HTTP 500
+// en cada llamada al chat). Por eso el parser de pesos COP va inline aqui.
+function digitsToInteger(digits: string): number {
+  if (!/^\d+$/.test(digits)) throw new Error(`Valor de dinero invalido: ${digits}`);
+  let total = 0;
+  for (const char of digits) total = total * 10 + (char.charCodeAt(0) - 48);
+  return total;
+}
+
+function hasValidThousandsGroups(value: string, separator: '.' | ','): boolean {
+  const parts = value.split(separator);
+  if (parts.length < 2) return false;
+  if (!/^\d{1,3}$/.test(parts[0])) return false;
+  return parts.slice(1).every((part) => /^\d{3}$/.test(part));
+}
+
+function parseSafeCOP(value: unknown): number {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) throw new Error('Valor de dinero invalido.');
+    return value;
+  }
+  const raw = String(value ?? '').trim();
+  if (!raw) throw new Error('Escribe un valor de dinero.');
+  if (/[-(]/.test(raw)) throw new Error('El dinero no puede ser negativo.');
+  const cleaned = raw.replace(/cop/gi, '').replace(/\$/g, '').replace(/\s+/g, '').trim();
+  if (!cleaned || !/^[0-9.,]+$/.test(cleaned)) throw new Error(`Valor de dinero invalido: ${raw}`);
+  if (/^\d+$/.test(cleaned)) return digitsToInteger(cleaned);
+  const dotCount = (cleaned.match(/\./g) || []).length;
+  const commaCount = (cleaned.match(/,/g) || []).length;
+  if (dotCount > 0 && commaCount > 0) throw new Error(`Valor de dinero ambiguo: ${raw}`);
+  const separator = dotCount > 0 ? '.' : ',';
+  if (!hasValidThousandsGroups(cleaned, separator)) throw new Error(`Valor de dinero ambiguo: ${raw}.`);
+  return digitsToInteger(cleaned.replace(/[.,]/g, ''));
+}
+
+function parseSafeChatAmount(value: unknown): number {
+  if (value === null || value === undefined || value === '') return 0;
+  if (typeof value === 'number') return parseSafeCOP(value);
+  const raw = String(value).trim();
+  if (/[-(]/.test(raw)) throw new Error('El dinero no puede ser negativo.');
+  try {
+    return parseSafeCOP(raw);
+  } catch {
+    const text = raw.toLowerCase().normalize('NFD').split('').filter((ch) => { const c = ch.charCodeAt(0); return c < 0x300 || c > 0x36f; }).join('');
+    const match = text.match(/(?:\$\s*)?([0-9][0-9.,]*)\s*(mil|lucas?|k|millones?|millon)?\b/i);
+    if (!match) throw new Error(`Valor de dinero invalido: ${raw}`);
+    const base = parseSafeCOP(match[1]);
+    const scale = match[2] || '';
+    // millon antes que mil: 'millones'.startsWith('mil') es true (evita error 1000x).
+    if (scale.startsWith('millon')) return base * 1_000_000;
+    if (scale.startsWith('mil') || scale.startsWith('luca') || scale === 'k') return base * 1_000;
+    return base;
+  }
+}
 
 type FastTransactionType = 'income' | 'expense';
 
@@ -304,12 +358,12 @@ export default async function handler(req: any, res: any) {
     ? `\n\nEXCEL ADJUNTO POR EL USUARIO:\n${String(excelImportContext).slice(0, 12000)}\n\nAnaliza este Excel como migracion financiera. Explica ingresos, gastos, balance, filas dudosas y pregunta si quiere guardar/importar. No digas que ya guardaste si aun no confirmo.`
     : '';
   const imageContextBlock = hasImage
-    ? '\n\nNOTA TECNICA: El usuario adjunto una imagen, pero este endpoint de DeepSeek V4 Pro solo acepta texto. No intentes procesar la imagen ni inventes su contenido. Pidele al usuario que escriba el valor, cuenta, persona o movimiento que aparece en la imagen.'
+    ? '\n\nNOTA TECNICA: El usuario adjunto una imagen, pero este endpoint de DeepSeek solo acepta texto. No intentes procesar la imagen ni inventes su contenido. Pidele al usuario que escriba el valor, cuenta, persona o movimiento que aparece en la imagen.'
     : '';
 
   const systemPrompt = `
 Eres el copiloto principal de "Ingresos y Egresos Hogar".
-Funcionas con DeepSeek V4 Pro desde Vercel con razonamiento alto. Tu objetivo NO es sonar como bot. Tu objetivo es pensar, acompañar, ordenar, explicar, crear y actuar con seguridad.
+Funcionas con DeepSeek desde Vercel. Tu objetivo NO es sonar como bot. Tu objetivo es pensar, acompañar, ordenar, explicar, crear y actuar con seguridad.
 
 USUARIO AUTENTICADO
 uid: ${verifiedUser.uid}
@@ -459,33 +513,45 @@ ${imageContextBlock}
   };
 
   const payload = {
-    model: 'deepseek-v4-pro',
+    // 'deepseek-chat' es un modelo REAL de la API de DeepSeek (el anterior
+    // 'deepseek-v4-pro' no existe -> la API lo rechazaba). 'deepseek-chat'
+    // soporta response_format json_object y es rapido. (El otro valido es
+    // 'deepseek-reasoner', mas lento y sin JSON mode.)
+    model: 'deepseek-chat',
     messages: [{ role: 'system', content: systemPrompt }, ...safeHistory(chatHistory), finalUserMessage],
     response_format: { type: 'json_object' },
-    thinking: { type: 'enabled' },
-    reasoning_effort: 'high',
     temperature: 0.72,
     max_tokens: 4096,
   };
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 55_000);
   try {
     const dsResponse = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
     const raw = await dsResponse.text();
     if (!dsResponse.ok) {
       console.error('DeepSeek API error', dsResponse.status, raw);
-      return res.status(502).json({ error: 'DeepSeek V4 Pro rechazo la solicitud.', status: dsResponse.status, details: raw.slice(0, 1500), source: 'deepseek-v4-pro' });
+      return res.status(502).json({ error: 'DeepSeek rechazo la solicitud.', status: dsResponse.status, details: raw.slice(0, 1500), source: 'deepseek' });
     }
     const data = JSON.parse(raw);
     const content = data?.choices?.[0]?.message?.content;
-    if (!content) return res.status(502).json({ error: 'DeepSeek V4 Pro respondio vacio.', source: 'deepseek-v4-pro' });
+    if (!content) return res.status(502).json({ error: 'DeepSeek respondio vacio.', source: 'deepseek' });
     const action = safeActionFromContent(content);
-    return res.status(200).json({ action, model: 'deepseek-v4-pro' });
+    return res.status(200).json({ action, model: 'deepseek-chat' });
   } catch (error: any) {
+    const aborted = error?.name === 'AbortError';
     console.error('Vercel DeepSeek route failed', error?.message || error);
-    return res.status(500).json({ error: 'Fallo la ruta Vercel de DeepSeek V4 Pro.', details: String(error?.message || error), source: 'vercel-api' });
+    return res.status(aborted ? 504 : 500).json({ error: aborted ? 'DeepSeek tardo demasiado en responder, intenta de nuevo.' : 'Fallo la ruta Vercel de DeepSeek.', details: String(error?.message || error), source: 'vercel-api' });
+  } finally {
+    clearTimeout(timeout);
   }
 }
+
+// Da margen a la llamada a DeepSeek (por defecto las funciones serverless
+// cortan a los 10s). El AbortController de arriba aborta a los 55s.
+export const config = { maxDuration: 60 };
