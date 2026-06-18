@@ -3,17 +3,20 @@ import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { AlertCircle, Bot, CheckCircle2, Loader2, Pencil, Plus, Send, Trash2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { auth, db } from '../lib/firebase';
-import { addActionLog, addChatMessage, assignOrphanMessagesToThread, deleteConversationMessages, getAccounts, getChatThreads, getDebts, getTransactions, getTransactionsByRange, saveChatThreads } from '../lib/firestore';
+import { addActionLog, addChatMessage, assignOrphanMessagesToThread, deleteConversationMessages, getAccounts, getAllTransactions, getChatThreads, getDebts, getTransactions, getTransactionsByRange, saveChatThreads } from '../lib/firestore';
 import { createAccountingTransaction, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { createDebtWithMoneyMovement, registerDebtPaymentWithMoneyMovement } from '../lib/debtMoney';
-import { buildFinancialSummaryForPeriod, toMoney } from '../lib/accounting';
+import { buildAccountingLedger, buildFinancialSummaryForPeriod, summarizeDebts, toMoney } from '../lib/accounting';
+import { buildMonthlyReport } from '../lib/reporting';
 import { classifyChatAccountingTarget } from '../lib/chatAccountingSafety';
 import { parseSafeChatAmount } from '../lib/safeMoney';
 import { getAiMemory, memoryToContext, updateAiMemory } from '../lib/aiMemory';
 import { EmptyState } from '../components/visual/EmptyState';
 import type { Account, AiInsight, AiMemoryProfile, ChatMessage, ChatThread, Debt, DebtDirection, FinancialSummary, Transaction, TransactionType } from '../types';
 import { formatCOP } from '../types';
+import { startOfMonth, endOfMonth, subMonths, format } from 'date-fns';
+import { es } from 'date-fns/locale';
 
 type ChatPageProps = { embedded?: boolean };
 type DangerousIntent = 'delete_transaction' | 'update_transaction' | 'register_debt_payment' | 'close_debt';
@@ -172,29 +175,79 @@ async function getLocalMonthlySummary(uid: string): Promise<FinancialSummary> {
   return buildFinancialSummaryForPeriod(txs, start, end, 'this_month');
 }
 
+function monthLabel(date: Date): string {
+  const raw = format(date, 'LLLL yyyy', { locale: es });
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
+// Construye un panorama financiero COMPLETO para que la IA conozca toda la
+// situacion: patrimonio, cuentas con conciliacion, categorias del mes, tendencia
+// de los ultimos meses, deudas y el diagnostico ya calculado por la app. Usa el
+// historial completo (getAllTransactions), no solo lo reciente.
 async function buildFinancialContext(uid: string) {
-  const [accounts, debts, recentTransactions, summary] = await Promise.all([
+  const [accounts, debts, allTx] = await Promise.all([
     getAccounts(uid),
-    getDebts(uid, 100).catch(() => [] as Debt[]),
-    getTransactions(uid, 100),
-    getLocalMonthlySummary(uid),
+    getDebts(uid, 200).catch(() => [] as Debt[]),
+    getAllTransactions(uid).catch(() => [] as Transaction[]),
   ]);
-  const openDebts = debts.filter((debt) => debt.status !== 'paid');
+
+  const now = new Date();
+  const summary = buildFinancialSummaryForPeriod(allTx, startOfMonth(now), endOfMonth(now), 'this_month');
+  const ledger = buildAccountingLedger(accounts, allTx, debts);
+  const report = buildMonthlyReport(allTx, debts);
+  const debtSummary = summarizeDebts(debts);
+
+  const accountLines = accounts.map((account) => {
+    const stats = ledger.byAccount[account.id];
+    const saldo = stats ? stats.saldoFisicoCalculado : toMoney(account.currentBalance || 0);
+    const estado = !stats ? '' : stats.saldoRealConfirmado ? (stats.estado === 'cuadra' ? ' | cuadra' : ` | descuadre ${formatCOP(Math.abs(stats.diferenciaConciliacion))}`) : ' | sin conciliar';
+    return `- ${account.name}${account.active === false ? ' (inactiva)' : ''}: ${formatCOP(saldo)}${estado}`;
+  }).join('\n');
+
+  const catLines = Object.entries(summary.byCategory)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([cat, value]) => `- ${cat}: ${formatCOP(value)}`)
+    .join('\n');
+
+  const trendLines = Array.from({ length: 6 }, (_, i) => 5 - i)
+    .map((back) => {
+      const ref = subMonths(now, back);
+      const periodo = buildFinancialSummaryForPeriod(allTx, startOfMonth(ref), endOfMonth(ref), 'custom');
+      return `- ${monthLabel(ref)}: ingresos ${formatCOP(periodo.totalIncome)}, gastos ${formatCOP(periodo.totalExpenses)}, balance ${formatCOP(periodo.balance)}`;
+    })
+    .join('\n');
+
+  const openDebts = debts.filter((debt) => debt.status !== 'paid' && !debt.isReversed);
   const debtList = openDebts
-    .slice(0, 12)
+    .slice(0, 20)
     .map((debt, index) => `${index + 1}. ${debt.direction === 'receivable' ? 'me deben' : 'yo debo'} ${formatCOP(debtRemaining(debt))} | ${debt.personName} | ${debt.description}`)
     .join('\n');
-  const recent = recentTransactions
+
+  const recent = [...allTx]
+    .sort((a, b) => b.date.getTime() - a.date.getTime())
     .slice(0, 50)
-    .map((tx, index) => `${index + 1}. ${tx.type === 'income' ? 'ingreso' : 'gasto'} ${formatCOP(tx.amount)} | ${tx.category} | ${tx.description} | cuenta ${tx.accountName}`)
+    .map((tx, index) => `${index + 1}. ${tx.date.toLocaleDateString('es-CO')} | ${tx.type === 'income' ? 'ingreso' : 'gasto'} ${formatCOP(toMoney(tx.amount))} | ${tx.category} | ${tx.description} | ${tx.accountName}`)
     .join('\n');
+
   const context = [
-    `Cuentas: ${accounts.map((account) => `${account.name} (${formatCOP(account.currentBalance || 0)})`).join(', ') || 'sin cuentas'}`,
-    `Resumen mes: ingresos ${formatCOP(summary.totalIncome)}, gastos ${formatCOP(summary.totalExpenses)}, balance ${formatCOP(summary.balance)}`,
-    `Movimientos recientes:\n${recent || 'sin movimientos recientes'}`,
-    `Deudas abiertas:\n${debtList || 'sin deudas abiertas'}`,
+    `PATRIMONIO GLOBAL: neto ${formatCOP(ledger.global.patrimonioNeto)} (liquido ${formatCOP(ledger.global.valorTotalLiquido)} + te deben ${formatCOP(debtSummary.receivable)} - tu debes ${formatCOP(debtSummary.payable)}). Cuentas activas: ${ledger.global.cuentasActivas}.`,
+    `CUENTAS (saldo y conciliacion):\n${accountLines || 'sin cuentas'}`,
+    `MES ACTUAL (${monthLabel(now)}): ingresos ${formatCOP(summary.totalIncome)}, gastos ${formatCOP(summary.totalExpenses)}, balance ${formatCOP(summary.balance)}.`,
+    `GASTOS DEL MES POR CATEGORIA:\n${catLines || 'sin gastos este mes'}`,
+    `DEUDAS ABIERTAS (te deben ${formatCOP(debtSummary.receivable)} en total, tu debes ${formatCOP(debtSummary.payable)} en total):\n${debtList || 'sin deudas abiertas'}`,
+    `MOVIMIENTOS RECIENTES (ultimos 50 de ${allTx.length} en total):\n${recent || 'sin movimientos'}`,
   ].join('\n\n');
-  return { accounts, debts, summary, context };
+
+  const diagnosticContext = [
+    `Tasa de ahorro de este mes: ${Number.isFinite(report.savingsRate) ? report.savingsRate.toFixed(1) : '0'}%.`,
+    report.topCategory ? `Categoria de mayor gasto este mes: ${report.topCategory[0]} (${formatCOP(report.topCategory[1])}).` : '',
+    `TENDENCIA ULTIMOS 6 MESES:\n${trendLines}`,
+    report.alerts.length ? `ALERTAS DETECTADAS:\n- ${report.alerts.join('\n- ')}` : 'Sin alertas fuertes este mes.',
+    report.opportunities.length ? `OPORTUNIDADES:\n- ${report.opportunities.join('\n- ')}` : '',
+  ].filter(Boolean).join('\n\n');
+
+  return { accounts, debts, summary, context, diagnosticContext };
 }
 
 async function callDeepSeek(payload: Record<string, unknown>, token: string): Promise<BotActionPro> {
@@ -346,9 +399,9 @@ function friendlyError(error: any): ChatErrorState {
 
 async function runSafeChat(uid: string, message: string, currentMessages: ChatMessage[], token: string, conversationId: string): Promise<PendingAction | null> {
   await addChatMessage(uid, { text: message, sender: 'user', conversationId });
-  const { accounts, debts, summary, context } = await buildFinancialContext(uid);
+  const { accounts, debts, summary, context, diagnosticContext } = await buildFinancialContext(uid);
   const memory = await getAiMemory(uid).catch(() => ({} as AiMemoryProfile));
-  const action = await callDeepSeek({ message, context, diagnosticContext: context, aiMemory: memoryToContext(memory), chatHistory: currentMessages.slice(-20) }, token);
+  const action = await callDeepSeek({ message, context, diagnosticContext, aiMemory: memoryToContext(memory), chatHistory: currentMessages.slice(-20) }, token);
   await persistMemory(uid, action);
 
   if (['delete_transaction', 'update_transaction', 'register_debt_payment', 'close_debt'].includes(action.intent) || looksLikeDeleteRequest(message)) {
