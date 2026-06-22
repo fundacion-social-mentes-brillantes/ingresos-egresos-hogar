@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { Loader2, Pencil, Plus, Search, ShieldCheck, Trash2 } from 'lucide-react';
+import { LayoutGrid, Loader2, Pencil, Plus, Search, ShieldCheck, Table, Trash2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTransactions } from '../hooks/useTransactions';
 import { deleteTransaction, getAccounts } from '../lib/firestore';
@@ -52,6 +52,14 @@ export function TransactionsPage() {
   const [open, setOpen] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
+  const [view, setView] = useState<'cards' | 'table'>(() => {
+    if (typeof window === 'undefined') return 'cards';
+    return localStorage.getItem('movimientos_view') === 'table' ? 'table' : 'cards';
+  });
+  const setViewPersist = (next: 'cards' | 'table') => {
+    setView(next);
+    try { localStorage.setItem('movimientos_view', next); } catch { /* ignorar */ }
+  };
 
   async function loadAccounts() {
     if (!user) return;
@@ -133,8 +141,48 @@ export function TransactionsPage() {
       </div>
     </section>
     {error && <div className="rounded-2xl border border-amber-400/25 bg-amber-500/10 p-3 text-sm font-bold text-amber-100">{error}</div>}
-    <section className="lux-card p-4"><div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div className="relative w-full lg:w-96"><Search className="absolute left-4 top-3.5 h-4 w-4 text-slate-500" /><input className="lux-input w-full rounded-2xl py-3 pl-11 pr-4 text-sm outline-none" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar..." /></div><div className="flex gap-2"><button className="soft-button rounded-2xl px-4 py-2 font-black" onClick={() => setKind('all')}>Todos</button><button className="soft-button rounded-2xl px-4 py-2 font-black" onClick={() => setKind('income')}>Ingresos</button><button className="soft-button rounded-2xl px-4 py-2 font-black" onClick={() => setKind('expense')}>Salidas</button></div></div></section>
-    <section className="premium-panel rounded-[1.6rem] border border-slate-700/40 p-3">{loading ? <div className="flex h-64 items-center justify-center"><Loader2 className="h-8 w-8 animate-spin" /></div> : <div className="grid gap-3">{filtered.map((tx) => { const reversed = Boolean(tx.isReversed || tx.reversalOf); return <article key={tx.id} className="rounded-3xl border border-slate-700/40 bg-slate-900/35 p-4"><div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between"><div><p className="font-black text-slate-100">{tx.description}</p><p className="text-xs text-slate-500">{tx.accountName}</p><div className="mt-2 flex gap-2"><Badge>{label(tx)}</Badge>{isProtectedTransaction(tx) && <Badge><ShieldCheck className="h-3 w-3" />Protegido</Badge>}{reversed && <Badge>Reversado</Badge>}</div></div><div className="flex items-center gap-3"><p className={tx.type === 'income' ? 'font-black text-green-300' : 'font-black text-red-300'}>{tx.type === 'income' ? '+' : '-'}{formatCOP(tx.amount)}</p><button disabled={reversed} onClick={() => openEdit(tx)} className="rounded-xl p-2 text-slate-400 hover:text-blue-300 disabled:opacity-30"><Pencil className="h-4 w-4" /></button><button disabled={reversed || busy === tx.id} onClick={() => removeTx(tx)} className="rounded-xl p-2 text-slate-400 hover:text-red-300 disabled:opacity-30">{busy === tx.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button></div></div></article>; })}</div>}</section>
+    <section className="lux-card p-4"><div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div className="relative w-full lg:w-96"><Search className="absolute left-4 top-3.5 h-4 w-4 text-slate-500" /><input className="lux-input w-full rounded-2xl py-3 pl-11 pr-4 text-sm outline-none" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar..." /></div><div className="flex flex-wrap items-center gap-2"><button className={`soft-button rounded-2xl px-4 py-2 font-black ${kind === 'all' ? 'text-blue-200' : ''}`} onClick={() => setKind('all')}>Todos</button><button className={`soft-button rounded-2xl px-4 py-2 font-black ${kind === 'income' ? 'text-green-200' : ''}`} onClick={() => setKind('income')}>Ingresos</button><button className={`soft-button rounded-2xl px-4 py-2 font-black ${kind === 'expense' ? 'text-red-200' : ''}`} onClick={() => setKind('expense')}>Salidas</button><div className="ml-auto flex items-center gap-1 rounded-2xl border border-slate-700/40 bg-slate-900/50 p-1 lg:ml-1"><button type="button" title="Vista tarjetas" onClick={() => setViewPersist('cards')} className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-black transition ${view === 'cards' ? 'bg-blue-500/20 text-blue-100' : 'text-slate-400 hover:text-slate-200'}`}><LayoutGrid className="h-4 w-4" />Tarjetas</button><button type="button" title="Vista tabla tipo Excel" onClick={() => setViewPersist('table')} className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-black transition ${view === 'table' ? 'bg-blue-500/20 text-blue-100' : 'text-slate-400 hover:text-slate-200'}`}><Table className="h-4 w-4" />Tabla</button></div></div></div></section>
+    <section className="premium-panel rounded-[1.6rem] border border-slate-700/40 p-3">
+      {loading ? (
+        <div className="flex h-64 items-center justify-center"><Loader2 className="h-8 w-8 animate-spin" /></div>
+      ) : filtered.length === 0 ? (
+        <div className="flex h-48 items-center justify-center text-sm text-slate-500">No hay movimientos para esta vista.</div>
+      ) : view === 'table' ? (
+        <div className="custom-scrollbar overflow-x-auto rounded-2xl border border-slate-800/60">
+          <table className="w-full min-w-[820px] border-collapse text-sm">
+            <thead>
+              <tr className="border-b border-slate-700/60 bg-slate-900/60 text-left text-[11px] font-black uppercase tracking-[0.12em] text-slate-400">
+                <th className="px-3 py-3">Fecha</th>
+                <th className="px-3 py-3">Tipo</th>
+                <th className="px-3 py-3">Descripcion</th>
+                <th className="px-3 py-3">Categoria</th>
+                <th className="px-3 py-3">Cuenta</th>
+                <th className="px-3 py-3 text-right">Valor</th>
+                <th className="px-3 py-3 text-right">Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((tx, i) => {
+                const reversed = Boolean(tx.isReversed || tx.reversalOf);
+                return (
+                  <tr key={tx.id} className={`border-b border-slate-800/60 ${i % 2 === 1 ? 'bg-slate-900/30' : ''} ${reversed ? 'opacity-50' : 'hover:bg-slate-800/40'}`}>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-slate-400">{tx.date.toLocaleDateString('es-CO')}</td>
+                    <td className="px-3 py-2.5"><span className={`inline-flex rounded-lg px-2 py-0.5 text-[10px] font-black ${tx.type === 'income' ? 'bg-green-500/15 text-green-300' : 'bg-red-500/15 text-red-300'}`}>{label(tx)}</span></td>
+                    <td className="px-3 py-2.5 font-bold text-slate-100">{tx.description}{isProtectedTransaction(tx) && <ShieldCheck className="ml-1.5 inline h-3 w-3 text-slate-500" />}{reversed && <span className="ml-2 text-[10px] font-bold text-slate-500">(reversado)</span>}</td>
+                    <td className="px-3 py-2.5 text-slate-300">{tx.category}</td>
+                    <td className="px-3 py-2.5 text-slate-300">{tx.accountName}</td>
+                    <td className={`whitespace-nowrap px-3 py-2.5 text-right font-black ${tx.type === 'income' ? 'text-green-300' : 'text-red-300'}`}>{tx.type === 'income' ? '+' : '-'}{formatCOP(tx.amount)}</td>
+                    <td className="px-3 py-2.5"><div className="flex items-center justify-end gap-1"><button disabled={reversed} onClick={() => openEdit(tx)} className="rounded-lg p-1.5 text-slate-400 hover:text-blue-300 disabled:opacity-30"><Pencil className="h-4 w-4" /></button><button disabled={reversed || busy === tx.id} onClick={() => removeTx(tx)} className="rounded-lg p-1.5 text-slate-400 hover:text-red-300 disabled:opacity-30">{busy === tx.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button></div></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="grid gap-3">{filtered.map((tx) => { const reversed = Boolean(tx.isReversed || tx.reversalOf); return <article key={tx.id} className="rounded-3xl border border-slate-700/40 bg-slate-900/35 p-4"><div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between"><div><p className="font-black text-slate-100">{tx.description}</p><p className="text-xs text-slate-500">{tx.accountName}</p><div className="mt-2 flex gap-2"><Badge>{label(tx)}</Badge>{isProtectedTransaction(tx) && <Badge><ShieldCheck className="h-3 w-3" />Protegido</Badge>}{reversed && <Badge>Reversado</Badge>}</div></div><div className="flex items-center gap-3"><p className={tx.type === 'income' ? 'font-black text-green-300' : 'font-black text-red-300'}>{tx.type === 'income' ? '+' : '-'}{formatCOP(tx.amount)}</p><button disabled={reversed} onClick={() => openEdit(tx)} className="rounded-xl p-2 text-slate-400 hover:text-blue-300 disabled:opacity-30"><Pencil className="h-4 w-4" /></button><button disabled={reversed || busy === tx.id} onClick={() => removeTx(tx)} className="rounded-xl p-2 text-slate-400 hover:text-red-300 disabled:opacity-30">{busy === tx.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button></div></div></article>; })}</div>
+      )}
+    </section>
     {open && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-xl"><form onSubmit={save} className="premium-panel w-full max-w-2xl rounded-[2rem] border border-slate-700/50 p-5"><h2 className="text-2xl font-black text-slate-100">{editing ? 'Editar' : 'Nuevo'}</h2><div className="mt-5 grid gap-4 sm:grid-cols-2">{!isTransfer(editing) && <><Select label="Tipo" value={form.type} onChange={(v) => setForm({ ...form, type: v as TransactionType, category: v === 'income' ? 'Ingreso' : 'Otros' })} options={[['income','Ingreso'],['expense','Gasto']]} /><Select label="Cuenta" value={form.accountId} onChange={(v) => setForm({ ...form, accountId: v })} options={accounts.map((a) => [a.id, a.name])} /></>}<Field label="Valor" value={form.amount} onChange={(v) => setForm({ ...form, amount: v })} />{!isTransfer(editing) && <Select label="Categoria" value={form.category} onChange={(v) => setForm({ ...form, category: v })} options={CATEGORIES.map((c) => [c, c])} />}<Field label="Descripcion" value={form.description} onChange={(v) => setForm({ ...form, description: v })} /><Field label="Fecha" type="date" value={form.date} onChange={(v) => setForm({ ...form, date: v })} /><Field label="Hora" type="time" value={form.time} onChange={(v) => setForm({ ...form, time: v })} /></div><div className="mt-6 flex justify-end gap-3"><button type="button" className="soft-button rounded-2xl px-4 py-2 font-black" onClick={() => setOpen(false)}>Cancelar</button><button type="submit" className="premium-button rounded-2xl px-4 py-2 font-black">Guardar</button></div></form></div>}
   </div>;
 }
