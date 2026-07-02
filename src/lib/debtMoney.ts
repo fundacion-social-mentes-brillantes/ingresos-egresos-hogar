@@ -1,4 +1,4 @@
-import { collection, doc, getDoc, getDocs, increment, query, runTransaction, serverTimestamp, Timestamp, where, writeBatch } from 'firebase/firestore';
+import { collection, doc, getDocs, increment, query, runTransaction, serverTimestamp, Timestamp, where, writeBatch } from 'firebase/firestore';
 import { db } from './firebase';
 import type { Account, Debt, DebtDirection } from '../types';
 import { affectsCash, toMoney } from './accounting';
@@ -190,51 +190,77 @@ export async function registerDebtPaymentWithMoneyMovement(uid: string, debtId: 
 }
 
 export async function voidDebtWithMoneyMovements(uid: string, debtId: string, reason = 'Anulacion de deuda') {
-  const snap = await getDoc(debtRef(uid, debtId));
-  if (!snap.exists()) throw new Error('No encontre la deuda.');
-  const debt = normalizeDebt(snap.id, snap.data());
-  if (debt.isReversed) throw new Error('Esta deuda ya fue anulada.');
-
+  // Anulacion ATOMICA (todo-o-nada) en UNA sola transaccion: releemos la deuda y
+  // sus movimientos DENTRO del runTransaction, revalidamos, y reversamos todo de
+  // golpe. Ventajas frente a un enfoque por pasos: (a) no existe estado
+  // intermedio -> una interrupcion no deja la deuda "anulada" con la plata sin
+  // reversar; (b) cierra el doble-clic/dos dispositivos (la relectura ve
+  // isReversed=true y aborta). Como una query no puede ir dentro de la
+  // transaccion, ubicamos los IDs antes y los releemos por ref dentro.
   const txSnap = await getDocs(query(txCol(uid), where('debtId', '==', debtId)));
-  const batch = writeBatch(db);
+  const candidateIds = txSnap.docs
+    .filter((item) => { const d = item.data() as Record<string, any>; return !d.isReversed && !d.reversalOf; })
+    .map((item) => item.id);
+  // Tope de seguridad: una transaccion admite hasta 500 escrituras. Cada
+  // movimiento genera ~2 (update + reverso). 150 deja margen holgado. Una deuda
+  // de hogar con >150 movimientos ligados es practicamente imposible; si pasa,
+  // preferimos un error claro a un descuadre silencioso.
+  if (candidateIds.length > 150) throw new Error('Esta deuda tiene demasiados movimientos para anularla de una sola vez de forma segura.');
+  const reverseRefs = candidateIds.map(() => doc(txCol(uid)));
+  const auditRef = doc(auditCol(uid));
 
-  txSnap.docs.forEach((item) => {
-    const tx = { id: item.id, ...item.data() } as any;
-    if (tx.isReversed || tx.reversalOf) return;
-    const amount = toMoney(tx.amount || 0);
-    const reverseType = tx.type === 'income' ? 'expense' : 'income';
-    const delta = -cashDelta(tx);
-    const reverse = doc(txCol(uid));
-    batch.update(txRef(uid, tx.id), { isReversed: true, reversedAt: serverTimestamp(), reversalReason: reason, updatedAt: serverTimestamp() });
-    batch.set(reverse, {
-      type: reverseType,
-      amount,
-      currency: 'COP',
-      category: 'Reverso deuda',
-      accountId: tx.accountId,
-      accountName: tx.accountName,
-      description: `Reverso de deuda: ${tx.description}`,
-      date: serverTimestamp(),
-      rawText: reason,
-      source: 'manual',
-      confidence: 1,
-      debtId,
-      movementKind: 'reconciliation_adjustment',
-      affectsCash: affectsCash(tx),
-      affectsReport: false,
-      affectsDebt: true,
-      excludeFromReports: true,
-      reversalOf: tx.id,
-      reversalReason: reason,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-    if (tx.accountId && delta !== 0) {
-      batch.update(accRef(uid, tx.accountId), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
+  await runTransaction(db, async (transaction) => {
+    const debtSnap = await transaction.get(debtRef(uid, debtId));
+    if (!debtSnap.exists()) throw new Error('No encontre la deuda.');
+    const debtData = debtSnap.data() as Record<string, any>;
+    if (debtData.isReversed) throw new Error('Esta deuda ya fue anulada.');
+
+    const movements: any[] = [];
+    for (const id of candidateIds) {
+      const snap = await transaction.get(txRef(uid, id));
+      if (!snap.exists()) continue;
+      const tx = { id: snap.id, ...snap.data() } as any;
+      if (tx.isReversed || tx.reversalOf) continue;
+      movements.push(tx);
     }
-  });
 
-  batch.update(debtRef(uid, debtId), { isReversed: true, status: 'paid', amountPaid: toMoney(debt.amountOriginal), reversalReason: reason, closedAt: serverTimestamp(), updatedAt: serverTimestamp() });
-  batch.set(doc(auditCol(uid)), { action: 'void_debt_with_money_movements', debtId, reason, createdAt: serverTimestamp() });
-  await batch.commit();
+    const deltasPorCuenta = new Map<string, number>();
+    movements.forEach((tx, index) => {
+      const amount = toMoney(tx.amount || 0);
+      const reverseType = tx.type === 'income' ? 'expense' : 'income';
+      const delta = -cashDelta(tx);
+      transaction.update(txRef(uid, tx.id), { isReversed: true, reversedAt: serverTimestamp(), reversalReason: reason, updatedAt: serverTimestamp() });
+      transaction.set(reverseRefs[index], {
+        type: reverseType,
+        amount,
+        currency: 'COP',
+        category: 'Reverso deuda',
+        accountId: tx.accountId,
+        accountName: tx.accountName,
+        description: `Reverso de deuda: ${tx.description}`,
+        date: serverTimestamp(),
+        rawText: reason,
+        source: 'manual',
+        confidence: 1,
+        debtId,
+        movementKind: 'reconciliation_adjustment',
+        affectsCash: affectsCash(tx),
+        affectsReport: false,
+        affectsDebt: true,
+        excludeFromReports: true,
+        reversalOf: tx.id,
+        reversalReason: reason,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      if (tx.accountId && delta !== 0) deltasPorCuenta.set(tx.accountId, (deltasPorCuenta.get(tx.accountId) || 0) + delta);
+    });
+    // Un solo increment NETO por cuenta.
+    deltasPorCuenta.forEach((delta, accountId) => {
+      if (delta !== 0) transaction.update(accRef(uid, accountId), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
+    });
+
+    transaction.update(debtRef(uid, debtId), { isReversed: true, status: 'paid', amountPaid: toMoney(debtData.amountOriginal || 0), reversalReason: reason, closedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    transaction.set(auditRef, { action: 'void_debt_with_money_movements', debtId, reason, reversedCount: movements.length, createdAt: serverTimestamp() });
+  });
 }

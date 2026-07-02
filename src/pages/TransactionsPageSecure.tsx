@@ -4,7 +4,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useTransactions } from '../hooks/useTransactions';
 import { deleteTransaction, getAccounts } from '../lib/firestore';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
-import { createAccountingTransaction, genericReversalBlockReason, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
+import { correctAccountingTransaction, createAccountingTransaction, genericReversalBlockReason, reverseTransfer } from '../lib/accountingOperations';
 import { inferMovementKind, isProtectedTransaction, isReportableFinancialTransaction, parseCurrencyInput, toMoney } from '../lib/accounting';
 import { asDate, formDateTimeFromDate, nowTimeStr, todayStr } from '../lib/dateForm';
 import { CATEGORIES, formatCOP } from '../types';
@@ -110,8 +110,12 @@ export function TransactionsPage() {
         }
         const account = accounts.find((a) => a.id === form.accountId);
         if (!account) throw new Error('Selecciona una cuenta.');
-        if (editing) await reverseAccountingTransaction(user.uid, editing.id, 'Correccion desde Movimientos');
-        await createAccountingTransaction(user.uid, { type: form.type, amount, accountId: account.id, category: form.category, description, date, source: 'manual', rawText: description, movementKind: form.type === 'income' ? 'income' : 'expense' });
+        if (editing) {
+          // Correccion atomica: reverso + corregido + saldos en una sola transaccion.
+          await correctAccountingTransaction(user.uid, editing.id, { type: form.type, amount, accountId: account.id, category: form.category, description, date, source: 'manual', rawText: description }, 'Correccion desde Movimientos');
+        } else {
+          await createAccountingTransaction(user.uid, { type: form.type, amount, accountId: account.id, category: form.category, description, date, source: 'manual', rawText: description, movementKind: form.type === 'income' ? 'income' : 'expense' });
+        }
       }
       setOpen(false); setEditing(null); await refresh(); await loadAccounts();
     } catch (err: any) { setError(err?.message || 'No pude guardar.'); }

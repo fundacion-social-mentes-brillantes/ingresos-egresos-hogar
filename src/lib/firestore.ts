@@ -20,7 +20,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { db } from './firebase';
-import { createAccountingTransaction, reverseAccountingTransaction } from './accountingOperations';
+import { correctAccountingTransaction, createAccountingTransaction, reverseAccountingTransaction } from './accountingOperations';
 import { transferBetweenAccountsSafe } from './transferOperations';
 import { createDebtWithMoneyMovement, registerDebtPaymentWithMoneyMovement, voidDebtWithMoneyMovements } from './debtMoney';
 import { genericReversalBlockReason, inferMovementKind, isProtectedTransaction, toMoney } from './accounting';
@@ -358,8 +358,10 @@ export async function updateTransaction(uid: string, id: string, data: Partial<T
   const nextAmount = data.amount ?? previous.amount;
   const nextAccountId = data.accountId || previous.accountId;
   if (!nextAccountId) throw new Error('La correccion necesita una cuenta real.');
-  await reverseAccountingTransaction(uid, id, 'Correccion legacy redirigida al motor contable');
-  return createAccountingTransaction(uid, {
+  // Correccion ATOMICA (reverso + corregido + saldos en una sola transaccion):
+  // antes eran dos commits y un fallo intermedio dejaba el dinero reversado sin
+  // el movimiento de reemplazo.
+  return correctAccountingTransaction(uid, id, {
     type: nextType,
     amount: nextAmount,
     accountId: nextAccountId,
@@ -368,9 +370,8 @@ export async function updateTransaction(uid: string, id: string, data: Partial<T
     date: data.date instanceof Date ? data.date : previous.date,
     source: data.source || previous.source || 'manual',
     rawText: data.rawText || previous.rawText || previous.description,
-    movementKind: nextType === 'income' ? 'income' : 'expense',
     excludeFromReports: data.excludeFromReports ?? previous.excludeFromReports,
-  });
+  }, 'Correccion legacy redirigida al motor contable');
 }
 
 export async function deleteTransaction(uid: string, id: string) {

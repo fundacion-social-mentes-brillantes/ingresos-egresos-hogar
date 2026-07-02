@@ -6,9 +6,19 @@ service cloud.firestore {
       return request.auth != null && request.auth.uid == userId;
     }
 
+    // Dinero SIN decimales (pesos COP enteros). Acepta int y tambien doubles
+    // enteros legacy (45000.0) para no bloquear reversos de datos antiguos,
+    // pero rechaza cualquier monto con decimales que corromperia los saldos.
+    // NO se validan tamanos de texto aqui: los asientos de reverso/correccion
+    // anteponen prefijos ("Reverso de: ...") y un tope rechazaria escrituras
+    // legitimas del propio motor. El control de tamano, si se quiere, va en la app.
+    function wholeMoney(value) {
+      return value is number && value == math.floor(value);
+    }
+
     function validTransaction(data) {
       return data.type in ['income', 'expense']
-        && data.amount is number
+        && wholeMoney(data.amount)
         && data.amount > 0
         && data.currency == 'COP'
         && data.category is string
@@ -21,42 +31,71 @@ service cloud.firestore {
     function validDebt(data) {
       return data.direction in ['receivable', 'payable']
         && data.personName is string
-        && data.amountOriginal is number
+        && wholeMoney(data.amountOriginal)
         && data.amountOriginal > 0
-        && data.amountPaid is number
+        && wholeMoney(data.amountPaid)
         && data.amountPaid >= 0
+        && data.amountPaid <= data.amountOriginal
         && data.currency == 'COP'
         && data.description is string
         && data.status in ['open', 'partial', 'paid'];
     }
 
+    // La papelera mueve dinero al restaurar: su contenido tambien se valida.
+    function validDeletedTransaction(data) {
+      return data.type in ['income', 'expense']
+        && wholeMoney(data.amount)
+        && data.amount > 0
+        && data.originalId is string;
+    }
+
+    function validChatMessage(data) {
+      return data.sender in ['user', 'bot']
+        && data.text is string;
+    }
+
     match /users/{userId} {
       allow read, write: if isOwner(userId);
-      
+
       match /transactions/{transactionId} {
         allow read: if isOwner(userId);
         allow create: if isOwner(userId) && validTransaction(request.resource.data);
-        allow update: if isOwner(userId) && validTransaction(request.resource.data);
+        // En update NO re-exigimos todos los campos (un movimiento legacy podria
+        // no tenerlos y marcar isReversed lo rechazaria), pero SI blindamos el
+        // dinero: nunca un monto con decimales o negativo.
+        allow update: if isOwner(userId)
+          && wholeMoney(request.resource.data.amount)
+          && request.resource.data.amount > 0;
         allow delete: if isOwner(userId);
       }
-      
+
       match /accounts/{accountId} {
         allow read, write: if isOwner(userId);
       }
-      
+
       match /chatMessages/{messageId} {
-        allow read, write: if isOwner(userId);
+        allow read, delete: if isOwner(userId);
+        allow create: if isOwner(userId) && validChatMessage(request.resource.data);
+        allow update: if isOwner(userId) && validChatMessage(request.resource.data);
       }
 
       match /debts/{debtId} {
         allow read: if isOwner(userId);
         allow create: if isOwner(userId) && validDebt(request.resource.data);
-        allow update: if isOwner(userId) && validDebt(request.resource.data);
+        // Update laxo en forma, estricto en dinero (abonos y anulacion tocan
+        // amountPaid/status): montos enteros y amountPaid nunca supera el total.
+        allow update: if isOwner(userId)
+          && wholeMoney(request.resource.data.amountOriginal)
+          && wholeMoney(request.resource.data.amountPaid)
+          && request.resource.data.amountPaid >= 0
+          && request.resource.data.amountPaid <= request.resource.data.amountOriginal;
         allow delete: if isOwner(userId);
       }
 
       match /deletedTransactions/{deletedId} {
-        allow read, write: if isOwner(userId);
+        allow read, delete: if isOwner(userId);
+        allow create: if isOwner(userId) && validDeletedTransaction(request.resource.data);
+        allow update: if isOwner(userId) && validDeletedTransaction(request.resource.data);
       }
 
       match /backupExports/{backupId} {
@@ -74,12 +113,12 @@ service cloud.firestore {
       match /aiMemory/{memoryId} {
         allow read, write: if isOwner(userId);
       }
-      
+
       match /settings/{settingId} {
         allow read, write: if isOwner(userId);
       }
     }
-    
+
     match /{document=**} {
       allow read, write: if false;
     }

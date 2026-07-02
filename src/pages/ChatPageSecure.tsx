@@ -4,7 +4,7 @@ import { AlertCircle, Bot, CheckCircle2, Loader2, Pencil, Plus, Send, Trash2 } f
 import { useAuth } from '../contexts/AuthContext';
 import { auth, db } from '../lib/firebase';
 import { addActionLog, addChatMessage, assignOrphanMessagesToThread, deleteConversationMessages, getAccounts, getAllTransactions, getChatThreads, getDebts, getTransactions, getTransactionsByRange, saveChatThreads } from '../lib/firestore';
-import { createAccountingTransaction, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
+import { correctAccountingTransaction, createAccountingTransaction, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { createDebtWithMoneyMovement, registerDebtPaymentWithMoneyMovement } from '../lib/debtMoney';
 import { buildAccountingLedger, buildFinancialSummaryForPeriod, summarizeDebts, toMoney } from '../lib/accounting';
@@ -269,8 +269,13 @@ async function callDeepSeek(payload: Record<string, unknown>, token: string): Pr
 
 async function findTransaction(uid: string, action: BotActionPro, message: string): Promise<Transaction | null> {
   // No se debe reversar un movimiento ya reversado ni un asiento de reverso:
-  // se excluyen para no proponer/ejecutar acciones sobre ellos.
-  const transactions = (await getTransactions(uid, 100)).filter((tx) => !tx.isReversed && !tx.reversalOf);
+  // se excluyen para no proponer/ejecutar acciones sobre ellos. Ademas, "el
+  // ultimo" se resuelve por ORDEN DE CAPTURA (createdAt), no por fecha del
+  // movimiento: si el usuario registro algo con fecha de ayer y dice "borra ese
+  // ultimo", debe apuntar a lo que ACABA de escribir, no al de fecha mas nueva.
+  const transactions = (await getTransactions(uid, 100))
+    .filter((tx) => !tx.isReversed && !tx.reversalOf)
+    .sort((a, b) => (b.createdAt?.getTime?.() || 0) - (a.createdAt?.getTime?.() || 0));
   const target = action.deleteTarget || action.updateTarget || {};
   const hasTargetAmount = hasAmountValue(target.amount);
   const amount = hasTargetAmount ? parseRequiredBotAmount(target.amount) : 0;
@@ -287,7 +292,12 @@ async function findDebt(uid: string, action: BotActionPro): Promise<Debt | null>
   const debts = (await getDebts(uid, 100)).filter((debt) => debt.status !== 'paid' && !debt.isReversed);
   const payment = action.debtPayment || {};
   const direction = payment.direction || null;
-  return debts.find((debt) => (direction ? debt.direction === direction : true) && personMatch(debt, payment.personName)) || null;
+  const matches = debts.filter((debt) => (direction ? debt.direction === direction : true) && personMatch(debt, payment.personName));
+  // Si el nombre casa con deudas de PERSONAS DISTINTAS (p.ej. "Ana" y "Ana
+  // Maria") no adivinamos: devolvemos null para que el bot pida aclaracion en
+  // vez de abonar a la deuda equivocada.
+  if (matches.length > 1 && new Set(matches.map((debt) => normalizeText(debt.personName))).size > 1) return null;
+  return matches[0] || null;
 }
 
 async function buildPendingAction(uid: string, action: BotActionPro, message: string, accounts: Account[]): Promise<PendingAction | null> {
@@ -363,18 +373,18 @@ async function executePendingAction(uid: string, pending: PendingAction): Promis
       await addActionLog(uid, { action: 'correct_transfer_with_reversal', entityType: 'transaction', entityId: tx.id, description: `Corrigió transferencia ${decision.transferId} con reverso completo`, before: tx, after: { transferId: created.transferId, amount }, source: 'bot', status: 'executed' });
       return `Confirmado. Reversé la transferencia completa y creé la corrección por ${formatCOP(amount)}.`;
     }
-    await reverseAccountingTransaction(uid, tx.id, 'Corrección solicitada desde chat');
-    const created = await createAccountingTransaction(uid, {
+    // Correccion ATOMICA (reverso + corregido + saldos en una transaccion) y
+    // conservando la fecha ORIGINAL del movimiento para no moverlo de mes.
+    const created = await correctAccountingTransaction(uid, tx.id, {
       type: tx.type,
       amount,
       accountId: tx.accountId,
       category: patch.category || tx.category,
       description: patch.description || `Corrección de ${tx.description}`,
-      date: new Date(),
+      date: tx.date instanceof Date && !Number.isNaN(tx.date.getTime()) ? tx.date : new Date(),
       source: 'bot',
       rawText: pending.message,
-      movementKind: tx.type === 'income' ? 'income' : 'expense',
-    });
+    }, 'Corrección solicitada desde chat');
     await addActionLog(uid, { action: 'correct_transaction_with_reversal', entityType: 'transaction', entityId: tx.id, description: `Corrigió ${tx.description} con reverso y nuevo movimiento`, before: tx, after: { newTransactionId: created.id, amount }, source: 'bot', status: 'executed' });
     return `Confirmado. Reversé el movimiento original y creé la corrección por ${formatCOP(amount)}. La trazabilidad quedó conservada.`;
   }
@@ -475,7 +485,7 @@ async function runSafeChat(uid: string, message: string, currentMessages: ChatMe
   }
 
   if (action.intent === 'query_debts') {
-    const open = debts.filter((debt) => debt.status !== 'paid');
+    const open = debts.filter((debt) => debt.status !== 'paid' && !debt.isReversed);
     const receivable = open.filter((debt) => debt.direction === 'receivable').reduce((sum, debt) => sum + debtRemaining(debt), 0);
     const payable = open.filter((debt) => debt.direction === 'payable').reduce((sum, debt) => sum + debtRemaining(debt), 0);
     replyToUser = action.replyToUser || `Tienes ${open.length} deudas abiertas. Te deben ${formatCOP(receivable)} y tú debes ${formatCOP(payable)}.`;

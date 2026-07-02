@@ -107,7 +107,12 @@ export async function confirmRealBalance(uid: string, accountId: string, realBal
       realBalance,
       lastReconciledBalance: realBalance,
       lastReconciledAt: serverTimestamp(),
-      calculatedBalance,
+      // OJO: NO sobreescribir calculatedBalance aqui. Ese campo lo mantiene el
+      // motor via increment() atomico; escribirlo como valor absoluto calculado
+      // FUERA de la transaccion pisaria un increment concurrente (un movimiento
+      // creado justo mientras se concilia). El recalculo se guarda aparte solo
+      // como dato informativo de la conciliacion.
+      ledgerCalculatedBalance: calculatedBalance,
       reconciliationDifference: reconciliation.diferencia,
       updatedAt: serverTimestamp(),
     });
@@ -224,6 +229,108 @@ export async function reverseAccountingTransaction(uid: string, transactionId: s
   return reverseRef;
 }
 
+// Correccion ATOMICA de un movimiento normal: reverso del original + creacion
+// del corregido + ajustes de saldo, todo en UNA transaccion. Antes esto eran dos
+// commits separados (reversar y luego crear): si fallaba el segundo, el dinero
+// quedaba reversado sin reemplazo y el usuario creia que habia "editado".
+export async function correctAccountingTransaction(uid: string, transactionId: string, input: {
+  type: TransactionType;
+  amount: unknown;
+  accountId: string;
+  category?: string;
+  description?: string;
+  date?: Date;
+  source?: 'manual' | 'bot';
+  rawText?: string;
+  excludeFromReports?: boolean;
+}, reason = 'Correccion contable') {
+  const amount = normalizeAmount(input.amount);
+  if (amount <= 0) throw new Error('El valor debe ser mayor que cero.');
+  const reverseRef = doc(txCol(uid));
+  const correctedRef = doc(txCol(uid));
+  const auditRef = doc(auditCol(uid));
+
+  await runTransaction(db, async (transaction) => {
+    // Lecturas primero (regla de Firestore), con revalidacion dentro de la tx.
+    const snap = await transaction.get(txRef(uid, transactionId));
+    if (!snap.exists()) throw new Error('El movimiento no existe.');
+    const data = snap.data() as Record<string, any>;
+    const original = { id: snap.id, ...data, amount: toMoney(data.amount) } as Transaction;
+    const blockReason = genericReversalBlockReason(original);
+    if (blockReason) throw new Error(blockReason);
+    if (isProtectedTransaction(original)) throw new Error('Movimiento protegido: usa su flujo especifico para conservar la contabilidad.');
+    const accountSnap = await transaction.get(accRef(uid, input.accountId));
+    if (!accountSnap.exists()) throw new Error('La cuenta no existe.');
+    const accountName = String((accountSnap.data() as Record<string, any>).name || '');
+
+    // 1) Reverso del original.
+    const originalAmount = toMoney(original.amount);
+    const reverseType: TransactionType = original.type === 'income' ? 'expense' : 'income';
+    const reverseDelta = affectsCash(original) ? (original.type === 'income' ? -originalAmount : originalAmount) : 0;
+    transaction.update(txRef(uid, original.id), { isReversed: true, reversedAt: serverTimestamp(), reversalReason: reason, updatedAt: serverTimestamp() });
+    transaction.set(reverseRef, {
+      type: reverseType,
+      amount: originalAmount,
+      currency: 'COP' as const,
+      category: 'Reverso contable',
+      accountId: original.accountId,
+      accountName: original.accountName,
+      description: `Reverso de: ${original.description}`,
+      date: serverTimestamp(),
+      rawText: reason,
+      source: 'manual' as const,
+      confidence: 1,
+      movementKind: 'reconciliation_adjustment' as const,
+      affectsCash: affectsCash(original),
+      affectsReport: false,
+      affectsDebt: false,
+      excludeFromReports: true,
+      reversalOf: original.id,
+      reversalReason: reason,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    // 2) Movimiento corregido.
+    const excludeFromReports = input.excludeFromReports ?? Boolean(original.excludeFromReports);
+    const correctedDelta = input.type === 'income' ? amount : -amount;
+    transaction.set(correctedRef, {
+      type: input.type,
+      amount,
+      currency: 'COP' as const,
+      category: input.category || original.category || (input.type === 'income' ? 'Ingreso' : 'Otros'),
+      accountId: input.accountId,
+      accountName,
+      description: input.description || `Correccion de ${original.description}`,
+      date: ts(input.date),
+      rawText: input.rawText || input.description || original.rawText || '',
+      source: input.source || 'manual',
+      confidence: 1,
+      movementKind: input.type === 'income' ? 'income' : 'expense',
+      affectsCash: true,
+      affectsReport: !excludeFromReports,
+      affectsDebt: false,
+      debtId: null,
+      excludeFromReports,
+      correctionOf: original.id,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    // 3) Ajustes de saldo NETOS por cuenta (una sola escritura por cuenta,
+    // incluso si el reverso y el corregido caen en la misma cuenta).
+    const deltasPorCuenta = new Map<string, number>();
+    if (reverseDelta !== 0 && original.accountId) deltasPorCuenta.set(original.accountId, (deltasPorCuenta.get(original.accountId) || 0) + reverseDelta);
+    deltasPorCuenta.set(input.accountId, (deltasPorCuenta.get(input.accountId) || 0) + correctedDelta);
+    deltasPorCuenta.forEach((delta, accountId) => {
+      if (delta !== 0) transaction.update(accRef(uid, accountId), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
+    });
+
+    transaction.set(auditRef, { action: 'correct_transaction_atomic', transactionId: original.id, reverseTransactionId: reverseRef.id, correctedTransactionId: correctedRef.id, amount, reason, createdAt: serverTimestamp() });
+  });
+  return correctedRef;
+}
+
 export async function validateTransferIntegrity(uid: string, transferId: string) {
   const snap = await getDocs(query(txCol(uid), where('transferId', '==', transferId)));
   const items = snap.docs.map((item) => ({ id: item.id, ...item.data() } as Transaction));
@@ -234,42 +341,62 @@ export async function validateTransferIntegrity(uid: string, transferId: string)
 }
 
 export async function reverseTransfer(uid: string, transferId: string, reason = 'Anulacion de transferencia') {
-  const integrity = await validateTransferIntegrity(uid, transferId);
-  if (!integrity.valid) throw new Error(integrity.message);
-  const batch = writeBatch(db);
-  for (const item of integrity.items) {
-    const tx = await getTransaction(uid, item.id);
-    const amount = toMoney(tx.amount);
-    const reverseType: TransactionType = tx.type === 'income' ? 'expense' : 'income';
-    const delta = tx.type === 'income' ? -amount : amount;
-    const reverseRef = doc(txCol(uid));
-    batch.update(txRef(uid, tx.id), { isReversed: true, reversedAt: serverTimestamp(), reversalReason: reason, updatedAt: serverTimestamp() });
-    batch.set(reverseRef, {
-      type: reverseType,
-      amount,
-      currency: 'COP',
-      category: 'Reverso transferencia',
-      accountId: tx.accountId,
-      accountName: tx.accountName,
-      description: `Reverso transferencia: ${tx.description}`,
-      date: serverTimestamp(),
-      rawText: reason,
-      source: 'manual',
-      confidence: 1,
-      movementKind: 'reconciliation_adjustment',
-      affectsCash: true,
-      affectsReport: false,
-      affectsDebt: false,
-      excludeFromReports: true,
-      reversalOf: tx.id,
-      transferId,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
+  // Una query no puede ir dentro de una transaccion de Firestore, asi que
+  // primero ubicamos los IDs de las dos patas y luego, DENTRO de runTransaction,
+  // releemos cada documento y revalidamos la integridad ahi mismo. Un doble
+  // reverso concurrente (doble clic, dos dispositivos, reintento de red) ve
+  // isReversed=true en la relectura y aborta, en vez de duplicar los increments
+  // en ambas cuentas.
+  const snap = await getDocs(query(txCol(uid), where('transferId', '==', transferId)));
+  const legIds = snap.docs.map((item) => item.id);
+  if (legIds.length !== 2) throw new Error('Transferencia rota, incompleta o ya reversada');
+  const reverseRefs = [doc(txCol(uid)), doc(txCol(uid))];
+  const auditRef = doc(auditCol(uid));
+
+  await runTransaction(db, async (transaction) => {
+    const legs: Transaction[] = [];
+    for (const id of legIds) {
+      const legSnap = await transaction.get(txRef(uid, id));
+      if (!legSnap.exists()) throw new Error('Transferencia rota, incompleta o ya reversada');
+      const data = legSnap.data() as Record<string, any>;
+      legs.push({ id: legSnap.id, ...data, amount: toMoney(data.amount) } as Transaction);
+    }
+    const out = legs.filter((tx) => inferMovementKind(tx) === 'transfer_out');
+    const input = legs.filter((tx) => inferMovementKind(tx) === 'transfer_in');
+    const valid = out.length === 1 && input.length === 1 && toMoney(out[0].amount) === toMoney(input[0].amount) && !legs.some((tx) => tx.isReversed || tx.reversalOf);
+    if (!valid) throw new Error('Transferencia rota, incompleta o ya reversada');
+
+    legs.forEach((tx, index) => {
+      const amount = toMoney(tx.amount);
+      const reverseType: TransactionType = tx.type === 'income' ? 'expense' : 'income';
+      const delta = tx.type === 'income' ? -amount : amount;
+      transaction.update(txRef(uid, tx.id), { isReversed: true, reversedAt: serverTimestamp(), reversalReason: reason, updatedAt: serverTimestamp() });
+      transaction.set(reverseRefs[index], {
+        type: reverseType,
+        amount,
+        currency: 'COP',
+        category: 'Reverso transferencia',
+        accountId: tx.accountId,
+        accountName: tx.accountName,
+        description: `Reverso transferencia: ${tx.description}`,
+        date: serverTimestamp(),
+        rawText: reason,
+        source: 'manual',
+        confidence: 1,
+        movementKind: 'reconciliation_adjustment',
+        affectsCash: true,
+        affectsReport: false,
+        affectsDebt: false,
+        excludeFromReports: true,
+        reversalOf: tx.id,
+        transferId,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      transaction.update(accRef(uid, tx.accountId), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
     });
-    batch.update(accRef(uid, tx.accountId), { currentBalance: increment(delta), calculatedBalance: increment(delta), updatedAt: serverTimestamp() });
-  }
-  batch.set(doc(auditCol(uid)), { action: 'reverse_transfer', transferId, reason, createdAt: serverTimestamp() });
-  await batch.commit();
+    transaction.set(auditRef, { action: 'reverse_transfer', transferId, reason, createdAt: serverTimestamp() });
+  });
 }
 
 export async function createPayableExpense(uid: string, input: { accountId: string; personName: string; amount: unknown; description: string; category?: string; dueDate?: Date | null; }) {

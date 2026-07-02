@@ -42,7 +42,7 @@ export function DashboardPage() {
 
   const topCategory = Object.entries(summary.byCategory).sort((a, b) => b[1] - a[1])[0];
   const expenseBars = Object.entries(summary.byCategory).sort((a, b) => b[1] - a[1]).slice(0, 5);
-  const openDebts = debts.filter((debt) => debt.status !== 'paid').slice(0, 4);
+  const openDebts = debts.filter((debt) => debt.status !== 'paid' && !debt.isReversed).slice(0, 4);
   const accountPreview = accounts.filter((account) => account.active).slice(0, 4);
   const firstName = displayName.split(' ')[0] || 'Usuario';
   const today = format(new Date(), "EEEE d 'de' MMMM", { locale: es });
