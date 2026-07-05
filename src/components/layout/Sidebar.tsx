@@ -16,6 +16,7 @@ import {
   ShieldCheck,
   Sparkles,
   WalletCards,
+  Users,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -32,9 +33,10 @@ const navItems = [
 ];
 
 export function Sidebar() {
-  const { logout } = useAuth();
+  const { logout, isAdmin } = useAuth();
   const { displayName, email, photo, initials } = useUserProfile();
   const navigate = useNavigate();
+  const items = isAdmin ? [...navItems, { to: '/admin', label: 'Admin', icon: Users }] : navItems;
 
   const handleLogout = async () => {
     await logout();
@@ -64,7 +66,7 @@ export function Sidebar() {
       </div>
 
       <nav className="custom-scrollbar flex-1 space-y-1 overflow-y-auto px-4 pb-4">
-        {navItems.map(({ to, label, icon: Icon }) => (
+        {items.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
             to={to}

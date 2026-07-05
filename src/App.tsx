@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { AppLayout } from './components/layout/AppLayout';
+import { AccessGate } from './components/visual/AccessGate';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ChatPage } from './pages/ChatPagePro';
@@ -11,12 +12,14 @@ import { DebtsPage } from './pages/DebtsPage';
 import { ReportsPage } from './pages/ReportsPage';
 import { BackupPage } from './pages/BackupPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { AdminPage } from './pages/AdminPage';
 import { Loader2 } from 'lucide-react';
 
-function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useAuth();
+function ProtectedRoute({ children, requireAdmin = false }: { children: React.ReactNode; requireAdmin?: boolean }) {
+  const { user, loading, access, accessResolved, isApproved, isAdmin } = useAuth();
 
-  if (loading) {
+  // Espera a resolver sesion Y acceso antes de decidir, para no parpadear.
+  if (loading || (user && !accessResolved)) {
     return (
       <div className="app-shell flex min-h-screen items-center justify-center">
         <div className="premium-icon h-16 w-16 text-blue-200">
@@ -28,6 +31,16 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
   if (!user) {
     return <Navigate to="/login" replace />;
+  }
+
+  // Porton de aprobacion: si no esta aprobado ve la pantalla de espera/denegado.
+  if (!isApproved) {
+    return <AccessGate status={access?.status} email={user.email} />;
+  }
+
+  // Rutas de admin: si no es admin, de vuelta al inicio.
+  if (requireAdmin && !isAdmin) {
+    return <Navigate to="/dashboard" replace />;
   }
 
   return <AppLayout>{children}</AppLayout>;
@@ -89,6 +102,12 @@ function AppRoutes() {
       <Route path="/settings" element={
         <ProtectedRoute>
           <SettingsPage />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/admin" element={
+        <ProtectedRoute requireAdmin>
+          <AdminPage />
         </ProtectedRoute>
       } />
 

@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { auth, callSeedDefaultUserData } from '../lib/firebase';
 import { createUserProfile, getUserProfile } from '../lib/firestore';
+import { ensureAccessRequest, isSuperAdminEmail, watchMyAccess, type AccessRecord } from '../lib/accessControl';
 import {
   GoogleAuthProvider,
   signInWithPopup,
@@ -19,6 +20,11 @@ import {
 interface AuthContextType {
   user: User | null;
   loading: boolean;
+  access: AccessRecord | null;
+  accessResolved: boolean;
+  isSuperAdmin: boolean;
+  isAdmin: boolean;
+  isApproved: boolean;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string, displayName: string) => Promise<void>;
   signInWithGoogle: () => Promise<void>;
@@ -40,6 +46,8 @@ function normalizeDisplayName(displayName: string, email: string): string {
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser]       = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [access, setAccess]   = useState<AccessRecord | null>(null);
+  const [accessResolved, setAccessResolved] = useState(false);
 
   const ensureUserProfile = async (firebaseUser: User) => {
     try {
@@ -85,20 +93,60 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     void prepareAuth();
 
+    let accessUnsub: (() => void) | null = null;
+    const stopAccess = () => { if (accessUnsub) { accessUnsub(); accessUnsub = null; } };
+
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
+      stopAccess();
       try {
         if (firebaseUser) {
           await ensureUserProfile(firebaseUser);
+          // Resolver el ACCESO (porton de aprobacion). El super-admin entra por
+          // correo sin depender de ningun documento. Los demas dependen de su
+          // doc en accessControl (pendiente / aprobado / denegado).
+          if (isSuperAdminEmail(firebaseUser.email)) {
+            setAccess({ uid: firebaseUser.uid, email: firebaseUser.email || '', status: 'approved', role: 'admin' });
+            setAccessResolved(true);
+          } else {
+            setAccessResolved(false);
+            accessUnsub = watchMyAccess(
+              firebaseUser.uid,
+              (record) => {
+                if (record) {
+                  setAccess(record);
+                  setAccessResolved(true);
+                } else {
+                  // Sin doc todavia: crea la solicitud pendiente (el listener
+                  // volvera a disparar con el doc real) y muestra "pendiente".
+                  setAccess({ uid: firebaseUser.uid, email: firebaseUser.email || '', status: 'pending', role: 'user' });
+                  setAccessResolved(true);
+                  void ensureAccessRequest(firebaseUser.uid, firebaseUser.email || '', firebaseUser.displayName || '').catch((e) => console.warn('No pude crear la solicitud de acceso', e));
+                }
+              },
+              () => {
+                // No se pudo evaluar el acceso (reglas de accessControl aun sin
+                // desplegar, u offline): FAIL-OPEN para no bloquear a nadie ni
+                // romper la app. Los datos siguen aislados por cuenta (isOwner);
+                // el porton se activa en cuanto las reglas nuevas esten publicadas.
+                setAccess({ uid: firebaseUser.uid, email: firebaseUser.email || '', status: 'approved', role: 'user' });
+                setAccessResolved(true);
+              },
+            );
+          }
+        } else {
+          setAccess(null);
+          setAccessResolved(true);
         }
         setUser(firebaseUser);
       } catch (err) {
         console.error('Auth state handling error:', err);
         setUser(firebaseUser);
+        setAccessResolved(true);
       } finally {
         setLoading(false);
       }
     });
-    return unsub;
+    return () => { stopAccess(); unsub(); };
   }, []);
 
   const signIn = async (email: string, password: string) => {
@@ -170,8 +218,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await signOut(auth);
   };
 
+  const superAdmin = isSuperAdminEmail(user?.email);
+  const isApproved = superAdmin || access?.status === 'approved';
+  const isAdmin = superAdmin || (access?.role === 'admin' && access?.status === 'approved');
+
   return (
-    <AuthContext.Provider value={{ user, loading, signIn, signUp, signInWithGoogle, logout }}>
+    <AuthContext.Provider value={{ user, loading, access, accessResolved, isSuperAdmin: superAdmin, isAdmin, isApproved, signIn, signUp, signInWithGoogle, logout }}>
       {children}
     </AuthContext.Provider>
   );

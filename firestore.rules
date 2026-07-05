@@ -6,6 +6,23 @@ service cloud.firestore {
       return request.auth != null && request.auth.uid == userId;
     }
 
+    // Super-admin por correo (ancla de confianza, no depende de ningun doc).
+    function isSuperAdmin() {
+      return request.auth != null
+        && request.auth.token.email == 'fundacionsocial@gimnasioemocionalmb.com';
+    }
+
+    // Admin de la app: el super-admin, o quien tenga un doc de acceso aprobado
+    // con rol admin (nombrado por el super-admin).
+    function isAppAdmin() {
+      return isSuperAdmin() || (
+        request.auth != null
+        && exists(/databases/$(database)/documents/accessControl/$(request.auth.uid))
+        && get(/databases/$(database)/documents/accessControl/$(request.auth.uid)).data.role == 'admin'
+        && get(/databases/$(database)/documents/accessControl/$(request.auth.uid)).data.status == 'approved'
+      );
+    }
+
     // Dinero SIN decimales (pesos COP enteros). Acepta int y tambien doubles
     // enteros legacy (45000.0) para no bloquear reversos de datos antiguos,
     // pero rechaza cualquier monto con decimales que corromperia los saldos.
@@ -117,6 +134,22 @@ service cloud.firestore {
       match /settings/{settingId} {
         allow read, write: if isOwner(userId);
       }
+    }
+
+    // Porton de acceso al programa (aprobacion por admin). NO guarda datos
+    // financieros; solo quien puede usar la app y con que rol.
+    match /accessControl/{docId} {
+      allow get: if request.auth != null && (request.auth.uid == docId || isAppAdmin());
+      allow list: if isAppAdmin();
+      // Un usuario crea SOLO su propia solicitud, forzosamente pendiente y rol
+      // user: nadie se auto-aprueba ni se hace admin.
+      allow create: if request.auth != null
+        && request.auth.uid == docId
+        && request.resource.data.status == 'pending'
+        && request.resource.data.role == 'user';
+      // Solo un admin decide estado/rol. El propio usuario NO edita su doc.
+      allow update: if isAppAdmin();
+      allow delete: if isSuperAdmin();
     }
 
     match /{document=**} {

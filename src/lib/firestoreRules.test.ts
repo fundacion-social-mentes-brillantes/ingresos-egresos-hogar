@@ -27,4 +27,15 @@ describe('firestore accounting audit rules', () => {
     expect(firestoreRules).toContain('validChatMessage(request.resource.data)');
     expect(firestoreRules).toMatch(/match\s+\/\{document=\*\*\}\s*\{\s*allow read, write: if false;\s*\}/);
   });
+
+  it('gates access control so users cannot self-approve or self-promote', () => {
+    expect(firestoreRules).toContain('match /accessControl/{docId}');
+    // Crear solo permite solicitudes pendientes con rol user.
+    expect(firestoreRules).toContain("request.resource.data.status == 'pending'");
+    expect(firestoreRules).toContain("request.resource.data.role == 'user'");
+    // Solo un admin puede cambiar estado/rol (aprobar/denegar/nombrar admin).
+    expect(firestoreRules).toMatch(/allow update: if isAppAdmin\(\);/);
+    // El super-admin es el ancla por correo.
+    expect(firestoreRules).toContain('fundacionsocial@gimnasioemocionalmb.com');
+  });
 });
