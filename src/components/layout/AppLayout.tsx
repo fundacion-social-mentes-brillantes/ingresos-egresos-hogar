@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { MobileNav } from './MobileNav';
+import { SpendingNudge } from '../visual/SpendingNudge';
 import { VISUAL_MODE_EVENT, applyVisualMode, getStoredVisualMode } from '../../lib/visualMode';
 
 interface AppLayoutProps {
@@ -63,6 +64,7 @@ export function AppLayout({ children }: AppLayoutProps) {
         </div>
       </main>
       <MobileNav />
+      <SpendingNudge />
     </div>
   );
 }
