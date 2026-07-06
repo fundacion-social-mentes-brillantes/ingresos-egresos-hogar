@@ -28,6 +28,15 @@ describe('firestore accounting audit rules', () => {
     expect(firestoreRules).toMatch(/match\s+\/\{document=\*\*\}\s*\{\s*allow read, write: if false;\s*\}/);
   });
 
+  it('lets admins list user PROFILES for the panel while financial subcollections stay owner-only', () => {
+    // El perfil (nombre/correo) es listable por admin para el panel...
+    expect(firestoreRules).toMatch(/match \/users\/\{userId\} \{[\s\S]{0,600}?allow list: if isAppAdmin\(\);/);
+    // ...pero las finanzas siguen siendo SOLO del dueno.
+    expect(firestoreRules).toMatch(/match \/transactions\/\{transactionId\} \{\s*allow read: if isOwner\(userId\);/);
+    expect(firestoreRules).toMatch(/match \/debts\/\{debtId\} \{\s*allow read: if isOwner\(userId\);/);
+    expect(firestoreRules).toMatch(/match \/accounts\/\{accountId\} \{\s*allow read, write: if isOwner\(userId\);/);
+  });
+
   it('gates access control so users cannot self-approve or self-promote', () => {
     expect(firestoreRules).toContain('match /accessControl/{docId}');
     // Crear solo permite solicitudes pendientes con rol user.

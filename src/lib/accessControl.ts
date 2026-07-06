@@ -1,4 +1,4 @@
-import { collection, doc, getDoc, getDocs, onSnapshot, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import { db } from './firebase';
 
 // Super-admin(s): siempre tienen acceso y son admin, identificados por su correo
@@ -87,10 +87,44 @@ export async function listAccess(): Promise<AccessRecord[]> {
   return snap.docs.map((d) => normalizeAccess(d.id, d.data()));
 }
 
-export async function decideAccess(uid: string, status: AccessStatus, deciderEmail: string) {
-  await updateDoc(accessRef(uid), { status, decidedAt: serverTimestamp(), decidedBy: normalizeEmail(deciderEmail) });
+// Todos los usuarios REGISTRADOS (perfil: solo nombre/correo/fecha). Las reglas
+// permiten a un admin listar el perfil, pero NUNCA las subcolecciones con las
+// finanzas de cada quien: eso sigue siendo privado del dueno.
+export interface RegisteredUser {
+  uid: string;
+  email: string;
+  displayName?: string;
+  createdAt?: Date;
 }
 
-export async function setAccessRole(uid: string, role: AccessRole, deciderEmail: string) {
-  await updateDoc(accessRef(uid), { role, decidedAt: serverTimestamp(), decidedBy: normalizeEmail(deciderEmail) });
+export async function listRegisteredUsers(): Promise<RegisteredUser[]> {
+  const snap = await getDocs(collection(db, 'users'));
+  return snap.docs.map((d) => {
+    const data = d.data() as Record<string, unknown>;
+    return {
+      uid: d.id,
+      email: normalizeEmail(data.email as string),
+      displayName: (data.displayName as string) || '',
+      createdAt: toDate(data.createdAt),
+    };
+  });
+}
+
+type ProfileHint = { email?: string; displayName?: string };
+
+function profileFields(profile?: ProfileHint) {
+  const fields: Record<string, unknown> = {};
+  if (profile?.email) fields.email = normalizeEmail(profile.email);
+  if (profile?.displayName) fields.displayName = profile.displayName;
+  return fields;
+}
+
+// setDoc con merge (no updateDoc): asi el admin tambien puede decidir sobre
+// alguien registrado que AUN no tiene doc de acceso (pre-aprobar/pre-denegar).
+export async function decideAccess(uid: string, status: AccessStatus, deciderEmail: string, profile?: ProfileHint) {
+  await setDoc(accessRef(uid), { ...profileFields(profile), status, decidedAt: serverTimestamp(), decidedBy: normalizeEmail(deciderEmail) }, { merge: true });
+}
+
+export async function setAccessRole(uid: string, role: AccessRole, deciderEmail: string, profile?: ProfileHint) {
+  await setDoc(accessRef(uid), { ...profileFields(profile), role, decidedAt: serverTimestamp(), decidedBy: normalizeEmail(deciderEmail) }, { merge: true });
 }

@@ -72,7 +72,13 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow read, write: if isOwner(userId);
+      // El PERFIL (nombre, correo y foto de perfil) lo puede leer un admin para
+      // el panel de administracion. Las reglas NO se heredan: los datos
+      // financieros viven en las subcolecciones de abajo y siguen siendo SOLO
+      // del dueno (ni el admin puede leerlos).
+      allow get: if isOwner(userId) || isAppAdmin();
+      allow list: if isAppAdmin();
+      allow create, update, delete: if isOwner(userId);
 
       match /transactions/{transactionId} {
         allow read: if isOwner(userId);
@@ -142,11 +148,13 @@ service cloud.firestore {
       allow get: if request.auth != null && (request.auth.uid == docId || isAppAdmin());
       allow list: if isAppAdmin();
       // Un usuario crea SOLO su propia solicitud, forzosamente pendiente y rol
-      // user: nadie se auto-aprueba ni se hace admin.
-      allow create: if request.auth != null
-        && request.auth.uid == docId
-        && request.resource.data.status == 'pending'
-        && request.resource.data.role == 'user';
+      // user: nadie se auto-aprueba ni se hace admin. Un admin SI puede crear
+      // el doc de otro (pre-aprobar a alguien registrado que aun no ha entrado).
+      allow create: if (request.auth != null
+          && request.auth.uid == docId
+          && request.resource.data.status == 'pending'
+          && request.resource.data.role == 'user')
+        || isAppAdmin();
       // Solo un admin decide estado/rol. El propio usuario NO edita su doc.
       allow update: if isAppAdmin();
       allow delete: if isSuperAdmin();
