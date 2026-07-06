@@ -552,3 +552,29 @@ export async function getSettings(uid: string): Promise<AppSettings> {
 export async function updateSettings(uid: string, data: Partial<AppSettings>) {
   return setDoc(settRef(uid), cleanUndefinedFields({ ...data, updatedAt: serverTimestamp() }), { merge: true });
 }
+
+// -- Presupuestos por categoria (solo AVISO, nunca bloquean) -----------------
+const budgetsRef = (uid: string) => doc(db, 'users', uid, 'settings', 'budgets');
+
+export async function getBudgets(uid: string): Promise<Record<string, number>> {
+  const snap = await getDoc(budgetsRef(uid));
+  if (!snap.exists()) return {};
+  const data = snap.data() as Record<string, unknown>;
+  const raw = data.budgets && typeof data.budgets === 'object' ? (data.budgets as Record<string, unknown>) : {};
+  const out: Record<string, number> = {};
+  for (const [cat, val] of Object.entries(raw)) {
+    const amount = toMoney(val);
+    if (amount > 0) out[cat] = amount;
+  }
+  return out;
+}
+
+export async function saveBudgets(uid: string, budgets: Record<string, number>) {
+  const clean: Record<string, number> = {};
+  for (const [cat, val] of Object.entries(budgets)) {
+    const amount = toMoney(val);
+    if (amount > 0) clean[cat] = amount; // 0 o vacio = sin presupuesto (se quita)
+  }
+  // merge:false para que quitar un presupuesto realmente lo elimine.
+  return setDoc(budgetsRef(uid), { budgets: clean, updatedAt: serverTimestamp() });
+}

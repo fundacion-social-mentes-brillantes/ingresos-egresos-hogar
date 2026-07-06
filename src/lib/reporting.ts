@@ -28,6 +28,62 @@ export function buildMonthlyReport(transactions: Transaction[], debts: Debt[]): 
   return { totalIncome: summary.totalIncome, totalExpenses: summary.totalExpenses, balance: summary.balance, savingsRate: rate, topCategory: sorted[0], byCategory: summary.byCategory, frequentCategories: sorted.slice(0, 5).map(([name]) => name), alerts, opportunities };
 }
 
+const MONTHS_ES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+
+export interface MonthlyTrendPoint { label: string; income: number; expenses: number; balance: number; }
+
+// Ingresos/gastos/balance de los ultimos N meses (para la grafica de tendencia).
+export function buildMonthlyTrend(transactions: Transaction[], months = 6): MonthlyTrendPoint[] {
+  const now = new Date();
+  const points: MonthlyTrendPoint[] = [];
+  for (let i = months - 1; i >= 0; i -= 1) {
+    const ref = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const start = new Date(ref.getFullYear(), ref.getMonth(), 1);
+    const end = new Date(ref.getFullYear(), ref.getMonth() + 1, 0, 23, 59, 59, 999);
+    const s = buildFinancialSummaryForPeriod(transactions, start, end, 'custom');
+    points.push({ label: MONTHS_ES[ref.getMonth()], income: s.totalIncome, expenses: s.totalExpenses, balance: s.balance });
+  }
+  return points;
+}
+
+// Exporta a Excel EXACTAMENTE los movimientos que se pasen (p.ej. los filtrados
+// en la pantalla Movimientos). Reusa ExcelJS ya incluido en el bundle.
+export async function exportTransactionsTable(transactions: Transaction[], fileName = 'movimientos.xlsx') {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Ingresos y Egresos Hogar';
+  workbook.created = new Date();
+  const sheet = workbook.addWorksheet('Movimientos');
+  sheet.columns = [
+    { header: 'Fecha', key: 'date', width: 14 },
+    { header: 'Tipo', key: 'type', width: 12 },
+    { header: 'Naturaleza', key: 'kind', width: 22 },
+    { header: 'Descripcion', key: 'description', width: 42 },
+    { header: 'Categoria', key: 'category', width: 20 },
+    { header: 'Cuenta', key: 'account', width: 22 },
+    { header: 'Valor', key: 'amount', width: 16 },
+  ];
+  transactions.forEach((tx) => sheet.addRow({
+    date: dt(tx.date),
+    type: tx.type === 'income' ? 'Ingreso' : 'Gasto',
+    kind: inferMovementKind(tx),
+    description: tx.description,
+    category: tx.category,
+    account: tx.accountName,
+    amount: (tx.type === 'income' ? 1 : -1) * toMoney(tx.amount),
+  }));
+  style(sheet, [7]);
+  const buffer = await workbook.xlsx.writeBuffer();
+  if (typeof window === 'undefined' || typeof document === 'undefined') return buffer;
+  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+  window.URL.revokeObjectURL(url);
+  return buffer;
+}
+
 function m(value: unknown): number { return toMoney(value); }
 function dt(value?: Date | null): string { return value instanceof Date && !Number.isNaN(value.getTime()) ? value.toLocaleString('es-CO'): ''; }
 function json(value: unknown): string { if (value === undefined || value === null || value === '') return ''; try { return JSON.stringify(value).slice(0, 32000); } catch { return String(value).slice(0, 32000); } }

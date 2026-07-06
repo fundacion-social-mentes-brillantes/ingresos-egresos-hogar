@@ -3,7 +3,7 @@ import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { AlertCircle, Bot, CheckCircle2, Loader2, Pencil, Plus, Send, Trash2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { auth, db } from '../lib/firebase';
-import { addActionLog, addChatMessage, assignOrphanMessagesToThread, deleteConversationMessages, getAccounts, getAllTransactions, getChatThreads, getDebts, getTransactions, getTransactionsByRange, saveChatThreads } from '../lib/firestore';
+import { addActionLog, addChatMessage, assignOrphanMessagesToThread, deleteConversationMessages, getAccounts, getAllTransactions, getBudgets, getChatThreads, getDebts, getTransactions, getTransactionsByRange, saveChatThreads } from '../lib/firestore';
 import { correctAccountingTransaction, createAccountingTransaction, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { createDebtWithMoneyMovement, registerDebtPaymentWithMoneyMovement } from '../lib/debtMoney';
@@ -185,10 +185,11 @@ function monthLabel(date: Date): string {
 // de los ultimos meses, deudas y el diagnostico ya calculado por la app. Usa el
 // historial completo (getAllTransactions), no solo lo reciente.
 async function buildFinancialContext(uid: string) {
-  const [accounts, debts, allTx] = await Promise.all([
+  const [accounts, debts, allTx, budgets] = await Promise.all([
     getAccounts(uid),
     getDebts(uid, 200).catch(() => [] as Debt[]),
     getAllTransactions(uid).catch(() => [] as Transaction[]),
+    getBudgets(uid).catch(() => ({} as Record<string, number>)),
   ]);
 
   const now = new Date();
@@ -239,8 +240,17 @@ async function buildFinancialContext(uid: string) {
     `MOVIMIENTOS RECIENTES (ultimos 50 de ${allTx.length} en total):\n${recent || 'sin movimientos'}`,
   ].join('\n\n');
 
+  const budgetLines = Object.entries(budgets)
+    .map(([cat, limit]) => {
+      const spent = summary.byCategory[cat] || 0;
+      const estado = spent > limit ? `SE PASO por ${formatCOP(spent - limit)}` : `quedan ${formatCOP(limit - spent)}`;
+      return `- ${cat}: gastado ${formatCOP(spent)} de ${formatCOP(limit)} (${estado})`;
+    })
+    .join('\n');
+
   const diagnosticContext = [
     `Tasa de ahorro de este mes: ${Number.isFinite(report.savingsRate) ? report.savingsRate.toFixed(1) : '0'}%.`,
+    budgetLines ? `PRESUPUESTOS POR CATEGORIA (topes que el usuario definio; son solo aviso, no limite):\n${budgetLines}` : '',
     report.topCategory ? `Categoria de mayor gasto este mes: ${report.topCategory[0]} (${formatCOP(report.topCategory[1])}).` : '',
     `TENDENCIA ULTIMOS 6 MESES:\n${trendLines}`,
     report.alerts.length ? `ALERTAS DETECTADAS:\n- ${report.alerts.join('\n- ')}` : 'Sin alertas fuertes este mes.',

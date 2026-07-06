@@ -2,12 +2,16 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTransactions } from '../hooks/useTransactions';
 import { useDebts } from '../hooks/useDebts';
-import { getAllTransactions } from '../lib/firestore';
-import { buildMonthlyReport, exportFinanceWorkbook } from '../lib/reporting';
-import { formatCOP } from '../types';
+import { getAllTransactions, getBudgets, saveBudgets } from '../lib/firestore';
+import { buildMonthlyReport, buildMonthlyTrend, exportFinanceWorkbook } from '../lib/reporting';
+import { CATEGORIES, formatCOP } from '../types';
 import type { Transaction } from '../types';
 import { EmptyState } from '../components/visual/EmptyState';
-import { AlertTriangle, Download, FileSpreadsheet, Lightbulb, PieChart, TrendingDown, TrendingUp, WalletCards } from 'lucide-react';
+import { TrendChart } from '../components/visual/TrendChart';
+import { AlertTriangle, Check, Download, FileSpreadsheet, Lightbulb, LineChart, Loader2, PieChart, Target, TrendingDown, TrendingUp, WalletCards } from 'lucide-react';
+
+const BUDGET_CATEGORIES = CATEGORIES.filter((c) => c !== 'Ingreso');
+const digitsOnly = (value: string): number => { const n = Number(String(value).replace(/[^0-9]/g, '')); return Number.isFinite(n) ? n : 0; };
 
 export function ReportsPage() {
   const { user } = useAuth();
@@ -23,6 +27,37 @@ export function ReportsPage() {
   useEffect(() => { loadAllTransactions().catch((error) => console.error('No pude cargar el historial completo para el reporte', error)); }, [loadAllTransactions]);
   const report = useMemo(() => buildMonthlyReport(transactions, debts), [transactions, debts]);
   const categories = Object.entries(report.byCategory).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  const trend = useMemo(() => buildMonthlyTrend(transactions, 6), [transactions]);
+
+  // Presupuestos por categoria (solo AVISO). draft = lo que se esta editando.
+  const [budgets, setBudgets] = useState<Record<string, number>>({});
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [savingBudgets, setSavingBudgets] = useState(false);
+  const [budgetMsg, setBudgetMsg] = useState('');
+  useEffect(() => {
+    if (!user) return;
+    getBudgets(user.uid).then((b) => {
+      setBudgets(b);
+      setDraft(Object.fromEntries(Object.entries(b).map(([k, v]) => [k, String(v)])));
+    }).catch((error) => console.error('No pude cargar presupuestos', error));
+  }, [user]);
+
+  const handleSaveBudgets = async () => {
+    if (!user) return;
+    setSavingBudgets(true);
+    setBudgetMsg('');
+    try {
+      const next: Record<string, number> = {};
+      for (const cat of BUDGET_CATEGORIES) { const n = digitsOnly(draft[cat] || ''); if (n > 0) next[cat] = n; }
+      await saveBudgets(user.uid, next);
+      setBudgets(next);
+      setBudgetMsg('Presupuestos guardados.');
+    } catch (error: any) {
+      setBudgetMsg(error?.message || 'No pude guardar los presupuestos.');
+    } finally {
+      setSavingBudgets(false);
+    }
+  };
 
   const exportReport = () => exportFinanceWorkbook({ transactions, debts, accounts, fileName: 'reporte-mensual-ingresos-egresos.xlsx' });
 
@@ -64,6 +99,18 @@ export function ReportsPage() {
           <p className="mt-2 text-2xl font-black text-slate-100">{report.savingsRate.toFixed(1)}%</p>
         </div>
       </div>
+
+      <section className="lux-card p-5">
+        <h2 className="mb-4 flex items-center gap-2 text-lg font-black text-slate-100">
+          <LineChart className="h-5 w-5 text-blue-300" />
+          Tendencia (últimos 6 meses)
+        </h2>
+        {transactions.length ? (
+          <TrendChart points={trend} />
+        ) : (
+          <EmptyState asset="reports" title="Aún no hay historial para la tendencia" description="Registra o importa movimientos y aquí verás cómo evolucionan tus ingresos y gastos mes a mes." />
+        )}
+      </section>
 
       <div className="grid gap-5 lg:grid-cols-[1.18fr_0.82fr]">
         <section className="lux-card p-5">
@@ -146,6 +193,56 @@ export function ReportsPage() {
           </section>
         </aside>
       </div>
+
+      <section className="lux-card p-5">
+        <div className="mb-1 flex items-center gap-2">
+          <Target className="h-5 w-5 text-blue-300" />
+          <h2 className="text-lg font-black text-slate-100">Presupuesto por categoría</h2>
+        </div>
+        <p className="mb-5 text-xs text-slate-500">Es solo un <span className="font-bold text-slate-300">aviso</span>, no un límite: nunca te bloquea gastar. Si te pasas, el copiloto te avisa con cariño. Deja en blanco para no vigilar una categoría.</p>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          {BUDGET_CATEGORIES.map((cat) => {
+            const spent = report.byCategory[cat] || 0;
+            const budget = budgets[cat] || 0;
+            const pct = budget > 0 ? (spent / budget) * 100 : 0;
+            const over = budget > 0 && spent > budget;
+            const near = budget > 0 && !over && pct >= 80;
+            const barColor = over ? 'bg-red-400' : near ? 'bg-amber-300' : 'bg-green-400';
+            return (
+              <div key={cat} className="rounded-2xl border border-slate-700/40 bg-slate-900/35 p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate text-sm font-black text-slate-100">{cat}</span>
+                  {over && <span className="shrink-0 rounded-full border border-red-400/30 bg-red-500/15 px-2 py-0.5 text-[10px] font-black text-red-200">Te pasaste {formatCOP(spent - budget)}</span>}
+                  {near && <span className="shrink-0 rounded-full border border-amber-400/30 bg-amber-400/15 px-2 py-0.5 text-[10px] font-black text-amber-200">Cerca del tope</span>}
+                </div>
+                <p className="mt-1 text-xs text-slate-400">Este mes: <span className="font-bold text-slate-200">{formatCOP(spent)}</span>{budget > 0 && <> de <span className="font-bold text-slate-200">{formatCOP(budget)}</span></>}</p>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-800/70">
+                  <div className={`h-full rounded-full ${barColor}`} style={{ width: `${budget > 0 ? Math.min(100, pct) : 0}%` }} />
+                </div>
+                <label className="mt-3 flex items-center gap-2">
+                  <span className="text-[11px] font-black text-slate-500">Tope mensual</span>
+                  <input
+                    inputMode="numeric"
+                    value={draft[cat] ?? ''}
+                    onChange={(e) => setDraft((prev) => ({ ...prev, [cat]: e.target.value }))}
+                    placeholder="sin tope"
+                    className="lux-input w-full rounded-xl px-3 py-2 text-sm outline-none"
+                  />
+                </label>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="mt-5 flex items-center gap-3">
+          <button onClick={handleSaveBudgets} disabled={savingBudgets} className="premium-button inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-black transition disabled:opacity-50">
+            {savingBudgets ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+            Guardar presupuestos
+          </button>
+          {budgetMsg && <span className="text-sm font-bold text-blue-200">{budgetMsg}</span>}
+        </div>
+      </section>
     </div>
   );
 }
