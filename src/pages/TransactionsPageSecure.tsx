@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { Download, LayoutGrid, Loader2, Pencil, Plus, Search, ShieldCheck, Table, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { endOfMonth, endOfYear, startOfMonth, startOfYear } from 'date-fns';
+import { CalendarRange, Download, LayoutGrid, Loader2, Pencil, Plus, Search, ShieldCheck, Table, Trash2, Wallet } from 'lucide-react';
 import { exportTransactionsTable } from '../lib/reporting';
 import { useAuth } from '../contexts/AuthContext';
 import { useTransactions } from '../hooks/useTransactions';
-import { deleteTransaction, getAccounts } from '../lib/firestore';
+import { deleteTransaction, getAllTransactions } from '../lib/firestore';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { correctAccountingTransaction, createAccountingTransaction, genericReversalBlockReason, reverseTransfer } from '../lib/accountingOperations';
 import { inferMovementKind, isProtectedTransaction, isReportableFinancialTransaction, parseCurrencyInput, toMoney } from '../lib/accounting';
@@ -13,7 +14,28 @@ import type { Account, Transaction, TransactionType } from '../types';
 
 type FormState = { type: TransactionType; amount: string; category: string; accountId: string; description: string; date: string; time: string };
 
-const blank = (accounts: Account[]): FormState => ({ type: 'expense', amount: '', category: 'Otros', accountId: accounts[0]?.id || '', description: '', date: todayStr(), time: nowTimeStr() });
+const MONTHS = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+
+// Para movimientos NUEVOS solo ofrecemos Efectivo y Banco (peticion de uso real).
+// Las cuentas viejas (Nequi, Daviplata, "Aki plata", etc.) se conservan en el
+// historial pero ya no aparecen para registrar cosas nuevas.
+const norm = (s: string) => s.trim().toLowerCase();
+const isCashName = (a: Account) => a.type === 'cash' || norm(a.name) === 'efectivo';
+const isBankName = (a: Account) => a.type === 'bank' || norm(a.name) === 'banco';
+
+function pickFormAccounts(active: Account[]): Account[] {
+  const byName = active.filter((a) => norm(a.name) === 'efectivo' || norm(a.name) === 'banco');
+  if (byName.length) return byName;
+  const byType = active.filter((a) => a.type === 'cash' || a.type === 'bank');
+  return byType.length ? byType : active;
+}
+
+function defaultAccountId(list: Account[]): string {
+  const banco = list.find((a) => isBankName(a));
+  return (banco || list[0])?.id || '';
+}
+
+const blank = (accounts: Account[]): FormState => ({ type: 'expense', amount: '', category: 'Otros', accountId: defaultAccountId(accounts), description: '', date: todayStr(), time: nowTimeStr() });
 const isTransfer = (tx: Transaction | null) => Boolean(tx?.transferId) || (tx ? inferMovementKind(tx).startsWith('transfer') : false);
 
 function formFromTx(tx: Transaction, accounts: Account[]): FormState {
@@ -42,10 +64,26 @@ function protectedMessage(tx: Transaction): string | null {
   return genericReversalBlockReason(tx);
 }
 
+// Suma ingresos/gastos reportables y cuenta los movimientos reales (no reversados)
+// de un conjunto ya filtrado por periodo.
+function aggregate(txs: Transaction[]) {
+  let income = 0, expense = 0, count = 0;
+  for (const tx of txs) {
+    if (tx.isReversed || tx.reversalOf) continue;
+    count += 1;
+    if (isReportableFinancialTransaction(tx)) {
+      if (tx.type === 'income') income += toMoney(tx.amount);
+      else expense += toMoney(tx.amount);
+    }
+  }
+  return { income, expense, balance: income - expense, count };
+}
+
 export function TransactionsPage() {
   const { user } = useAuth();
-  const { transactions, loading, refresh } = useTransactions();
-  const [accounts, setAccounts] = useState<Account[]>([]);
+  const { accounts } = useTransactions();
+  const [allTx, setAllTx] = useState<Transaction[]>([]);
+  const [txLoading, setTxLoading] = useState(true);
   const [query, setQuery] = useState('');
   const [kind, setKind] = useState<'all' | 'income' | 'expense'>('all');
   const [editing, setEditing] = useState<Transaction | null>(null);
@@ -62,28 +100,69 @@ export function TransactionsPage() {
     try { localStorage.setItem('movimientos_view', next); } catch { /* ignorar */ }
   };
 
-  async function loadAccounts() {
+  const now = useMemo(() => new Date(), []);
+  const year = now.getFullYear();
+  const currentMonth = now.getMonth();
+  const [selectedMonth, setSelectedMonth] = useState(currentMonth);
+
+  const loadAllTx = useCallback(async () => {
     if (!user) return;
-    setAccounts((await getAccounts(user.uid)).filter((a) => a.active !== false));
-  }
+    setTxLoading(true);
+    try { setAllTx(await getAllTransactions(user.uid)); }
+    catch { /* conservamos lo que ya haya */ }
+    finally { setTxLoading(false); }
+  }, [user]);
 
-  useEffect(() => { loadAccounts().catch(() => setAccounts([])); }, [user?.uid]);
+  useEffect(() => { loadAllTx().catch(() => setTxLoading(false)); }, [loadAllTx]);
 
-  const filtered = useMemo(() => transactions.filter((tx) => {
+  const activeAccounts = useMemo(() => accounts.filter((a) => a.active !== false), [accounts]);
+  const formAccounts = useMemo(() => pickFormAccounts(activeAccounts), [activeAccounts]);
+
+  // Al editar dejamos elegir cualquier cuenta e incluimos la cuenta original del
+  // movimiento aunque este inactiva, para no cambiarla sin querer al guardar.
+  const accountOptions = useMemo(() => {
+    const base = editing ? activeAccounts.slice() : formAccounts.slice();
+    if (form.accountId && !base.some((a) => a.id === form.accountId)) {
+      const cur = accounts.find((a) => a.id === form.accountId);
+      if (cur) base.unshift(cur);
+    }
+    return base;
+  }, [editing, activeAccounts, formAccounts, accounts, form.accountId]);
+
+  // Si abren "Manual" antes de que carguen las cuentas (listener en tiempo real),
+  // en cuanto lleguen fijamos Banco por defecto para que no quede sin cuenta.
+  useEffect(() => {
+    if (open && !editing && !form.accountId && formAccounts.length) {
+      setForm((f) => ({ ...f, accountId: defaultAccountId(formAccounts) }));
+    }
+  }, [open, editing, form.accountId, formAccounts]);
+
+  // Saldo actual (dinero de verdad hoy): sumamos los saldos mantenidos por el
+  // motor contable. Efectivo = cuentas de efectivo; Banco = todo lo demas.
+  const saldo = useMemo(() => {
+    let total = 0, efectivo = 0;
+    for (const a of activeAccounts) {
+      const bal = toMoney(a.currentBalance);
+      total += bal;
+      if (isCashName(a)) efectivo += bal;
+    }
+    return { total, efectivo, banco: total - efectivo };
+  }, [activeAccounts]);
+
+  const monthRange = useMemo(() => ({ start: startOfMonth(new Date(year, selectedMonth, 1)), end: endOfMonth(new Date(year, selectedMonth, 1)) }), [year, selectedMonth]);
+  const yearRange = useMemo(() => ({ start: startOfYear(now), end: endOfYear(now) }), [now]);
+
+  const monthTx = useMemo(() => allTx.filter((tx) => tx.date >= monthRange.start && tx.date <= monthRange.end), [allTx, monthRange]);
+  const yearTx = useMemo(() => allTx.filter((tx) => tx.date >= yearRange.start && tx.date <= yearRange.end), [allTx, yearRange]);
+  const monthAgg = useMemo(() => aggregate(monthTx), [monthTx]);
+  const yearAgg = useMemo(() => aggregate(yearTx), [yearTx]);
+
+  const filtered = useMemo(() => monthTx.filter((tx) => {
     const text = `${tx.description} ${tx.category} ${tx.accountName}`.toLowerCase();
     return (kind === 'all' || tx.type === kind) && text.includes(query.toLowerCase());
-  }), [transactions, kind, query]);
+  }), [monthTx, kind, query]);
 
-  const totals = useMemo(() => filtered.reduce((a, tx) => {
-    if (tx.isReversed || tx.reversalOf) return a;
-    const amount = toMoney(tx.amount);
-    if (isReportableFinancialTransaction(tx)) tx.type === 'income' ? a.income += amount : a.expense += amount;
-    else if (inferMovementKind(tx).startsWith('transfer')) a.transfer += amount;
-    else if (inferMovementKind(tx) === 'historical_non_reportable') a.history += amount;
-    return a;
-  }, { income: 0, expense: 0, transfer: 0, history: 0 }), [filtered]);
-
-  function openCreate() { setEditing(null); setForm(blank(accounts)); setError(''); setOpen(true); }
+  function openCreate() { setEditing(null); setForm(blank(formAccounts)); setError(''); setOpen(true); }
   function openEdit(tx: Transaction) {
     if (tx.isReversed || tx.reversalOf) return setError('Ese movimiento ya esta reversado.');
     const reason = protectedMessage(tx);
@@ -118,7 +197,7 @@ export function TransactionsPage() {
           await createAccountingTransaction(user.uid, { type: form.type, amount, accountId: account.id, category: form.category, description, date, source: 'manual', rawText: description, movementKind: form.type === 'income' ? 'income' : 'expense' });
         }
       }
-      setOpen(false); setEditing(null); await refresh(); await loadAccounts();
+      setOpen(false); setEditing(null); await loadAllTx();
     } catch (err: any) { setError(err?.message || 'No pude guardar.'); }
   }
 
@@ -133,25 +212,73 @@ export function TransactionsPage() {
     try {
       if (isTransfer(tx) && tx.transferId) await reverseTransfer(user.uid, tx.transferId, 'Quitar desde Movimientos');
       else await deleteTransaction(user.uid, tx.id); // archiva en papelera (recuperable) y luego reversa
-      await refresh(); await loadAccounts();
+      await loadAllTx();
     } catch (err: any) { setError(err?.message || 'No pude quitar el movimiento.'); }
     finally { setBusy(null); }
   }
 
+  const monthName = MONTHS[selectedMonth];
+  const isCurrentMonth = selectedMonth === currentMonth;
+
   return <div className="space-y-6 pb-10">
     <section className="lux-hero p-5 sm:p-7">
-      <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-        <div><p className="lux-kicker">Libro personal</p><h1 className="lux-heading mt-2 text-3xl sm:text-4xl">Movimientos</h1><p className="lux-subtle mt-2 text-sm">Lapiz para editar. Papelera para quitar. En transferencias se corrigen las dos patas; deudas e historicos mantienen su flujo seguro.</p></div>
-        <div className="grid gap-3 sm:min-w-[640px] sm:grid-cols-5"><Metric t="Ingresos" v={totals.income} /><Metric t="Gastos" v={totals.expense} /><Metric t="Historicos" v={totals.history} /><Metric t="Transferencias" v={totals.transfer} /><button className="premium-button rounded-3xl px-4 py-3 font-black" onClick={openCreate}><Plus className="mr-2 inline h-4 w-4" />Manual</button></div>
+      <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p className="lux-kicker">Libro personal</p>
+          <h1 className="lux-heading mt-2 text-3xl sm:text-4xl">Movimientos</h1>
+          <p className="lux-subtle mt-2 text-sm">Por defecto ves el mes actual. Cambia de mes con el selector, revisa el histórico del año y tu saldo actual sin salir de aquí.</p>
+        </div>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <label className="flex items-center gap-2 rounded-2xl border border-slate-700/40 bg-slate-900/50 px-3 py-2">
+            <CalendarRange className="h-4 w-4 text-blue-300" />
+            <span className="text-xs font-black uppercase tracking-[0.12em] text-slate-400">Mes</span>
+            <select className="bg-transparent text-sm font-black text-slate-100 outline-none" value={selectedMonth} onChange={(e) => setSelectedMonth(Number(e.target.value))}>
+              {MONTHS.slice(0, currentMonth + 1).map((m, i) => <option key={i} value={i} className="bg-slate-900">{m} {year}</option>)}
+            </select>
+          </label>
+          <button className="premium-button rounded-3xl px-5 py-3 font-black" onClick={openCreate}><Plus className="mr-2 inline h-4 w-4" />Manual</button>
+        </div>
+      </div>
+      <div className="mt-6">
+        <p className="text-xs font-black uppercase tracking-[0.14em] text-slate-400">Resumen de {monthName}{isCurrentMonth ? ' (mes actual)' : ''}</p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Stat label="Ingresos del mes" value={formatCOP(monthAgg.income)} tone="green" />
+          <Stat label="Gastos del mes" value={formatCOP(monthAgg.expense)} tone="red" />
+          <Stat label="Movimientos del mes" value={String(monthAgg.count)} tone="blue" />
+          <Stat label="Balance del mes" value={formatCOP(monthAgg.balance)} tone={monthAgg.balance >= 0 ? 'green' : 'red'} />
+        </div>
       </div>
     </section>
+
+    <div className="grid gap-4 lg:grid-cols-2">
+      <section className="lux-card p-5">
+        <div className="flex items-center gap-2"><Wallet className="h-4 w-4 text-emerald-300" /><h2 className="text-sm font-black uppercase tracking-[0.14em] text-slate-300">Saldo actual</h2></div>
+        <p className="mt-3 text-3xl font-black text-slate-50">{formatCOP(saldo.total)}</p>
+        <p className="text-xs text-slate-500">Dinero disponible en total ahora mismo</p>
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <div className="rounded-2xl border border-slate-700/40 bg-slate-900/40 p-3"><p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">Banco</p><p className="mt-1 text-lg font-black text-slate-100">{formatCOP(saldo.banco)}</p></div>
+          <div className="rounded-2xl border border-slate-700/40 bg-slate-900/40 p-3"><p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">Efectivo</p><p className="mt-1 text-lg font-black text-slate-100">{formatCOP(saldo.efectivo)}</p></div>
+        </div>
+      </section>
+      <section className="lux-card p-5">
+        <div className="flex items-center gap-2"><CalendarRange className="h-4 w-4 text-blue-300" /><h2 className="text-sm font-black uppercase tracking-[0.14em] text-slate-300">Histórico del año {year}</h2></div>
+        <p className="mt-1 text-xs text-slate-500">Acumulado de enero a hoy</p>
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <div className="rounded-2xl border border-green-400/20 bg-green-400/10 p-3"><p className="text-[10px] font-black uppercase tracking-[0.14em] text-green-300">Ingresos</p><p className="mt-1 text-lg font-black text-slate-100">{formatCOP(yearAgg.income)}</p></div>
+          <div className="rounded-2xl border border-red-400/20 bg-red-400/10 p-3"><p className="text-[10px] font-black uppercase tracking-[0.14em] text-red-300">Gastos</p><p className="mt-1 text-lg font-black text-slate-100">{formatCOP(yearAgg.expense)}</p></div>
+          <div className="rounded-2xl border border-slate-700/40 bg-slate-900/40 p-3"><p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">Balance</p><p className={`mt-1 text-lg font-black ${yearAgg.balance >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>{formatCOP(yearAgg.balance)}</p></div>
+          <div className="rounded-2xl border border-slate-700/40 bg-slate-900/40 p-3"><p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">Movimientos</p><p className="mt-1 text-lg font-black text-slate-100">{yearAgg.count}</p></div>
+        </div>
+      </section>
+    </div>
+
     {error && <div className="rounded-2xl border border-amber-400/25 bg-amber-500/10 p-3 text-sm font-bold text-amber-100">{error}</div>}
-    <section className="lux-card p-4"><div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div className="relative w-full lg:w-96"><Search className="absolute left-4 top-3.5 h-4 w-4 text-slate-500" /><input className="lux-input w-full rounded-2xl py-3 pl-11 pr-4 text-sm outline-none" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar..." /></div><div className="flex flex-wrap items-center gap-2"><button className={`soft-button rounded-2xl px-4 py-2 font-black ${kind === 'all' ? 'text-blue-200' : ''}`} onClick={() => setKind('all')}>Todos</button><button className={`soft-button rounded-2xl px-4 py-2 font-black ${kind === 'income' ? 'text-green-200' : ''}`} onClick={() => setKind('income')}>Ingresos</button><button className={`soft-button rounded-2xl px-4 py-2 font-black ${kind === 'expense' ? 'text-red-200' : ''}`} onClick={() => setKind('expense')}>Salidas</button><div className="ml-auto flex items-center gap-1 rounded-2xl border border-slate-700/40 bg-slate-900/50 p-1 lg:ml-1"><button type="button" title="Vista tarjetas" onClick={() => setViewPersist('cards')} className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-black transition ${view === 'cards' ? 'bg-blue-500/20 text-blue-100' : 'text-slate-400 hover:text-slate-200'}`}><LayoutGrid className="h-4 w-4" />Tarjetas</button><button type="button" title="Vista tabla tipo Excel" onClick={() => setViewPersist('table')} className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-black transition ${view === 'table' ? 'bg-blue-500/20 text-blue-100' : 'text-slate-400 hover:text-slate-200'}`}><Table className="h-4 w-4" />Tabla</button></div><button type="button" title="Descargar a Excel lo que se ve ahora" disabled={filtered.length === 0} onClick={() => { exportTransactionsTable(filtered, 'movimientos.xlsx').catch((err) => setError(err?.message || 'No pude exportar.')); }} className="soft-button inline-flex items-center gap-1.5 rounded-2xl px-3 py-2 text-xs font-black disabled:opacity-40"><Download className="h-4 w-4" />Excel</button></div></div></section>
+    <section className="lux-card p-4"><div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div className="relative w-full lg:w-96"><Search className="absolute left-4 top-3.5 h-4 w-4 text-slate-500" /><input className="lux-input w-full rounded-2xl py-3 pl-11 pr-4 text-sm outline-none" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar en este mes..." /></div><div className="flex flex-wrap items-center gap-2"><button className={`soft-button rounded-2xl px-4 py-2 font-black ${kind === 'all' ? 'text-blue-200' : ''}`} onClick={() => setKind('all')}>Todos</button><button className={`soft-button rounded-2xl px-4 py-2 font-black ${kind === 'income' ? 'text-green-200' : ''}`} onClick={() => setKind('income')}>Ingresos</button><button className={`soft-button rounded-2xl px-4 py-2 font-black ${kind === 'expense' ? 'text-red-200' : ''}`} onClick={() => setKind('expense')}>Salidas</button><div className="ml-auto flex items-center gap-1 rounded-2xl border border-slate-700/40 bg-slate-900/50 p-1 lg:ml-1"><button type="button" title="Vista tarjetas" onClick={() => setViewPersist('cards')} className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-black transition ${view === 'cards' ? 'bg-blue-500/20 text-blue-100' : 'text-slate-400 hover:text-slate-200'}`}><LayoutGrid className="h-4 w-4" />Tarjetas</button><button type="button" title="Vista tabla tipo Excel" onClick={() => setViewPersist('table')} className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-black transition ${view === 'table' ? 'bg-blue-500/20 text-blue-100' : 'text-slate-400 hover:text-slate-200'}`}><Table className="h-4 w-4" />Tabla</button></div><button type="button" title="Descargar a Excel lo que se ve ahora" disabled={filtered.length === 0} onClick={() => { exportTransactionsTable(filtered, `movimientos-${monthName.toLowerCase()}-${year}.xlsx`).catch((err) => setError(err?.message || 'No pude exportar.')); }} className="soft-button inline-flex items-center gap-1.5 rounded-2xl px-3 py-2 text-xs font-black disabled:opacity-40"><Download className="h-4 w-4" />Excel</button></div></div></section>
     <section className="premium-panel rounded-[1.6rem] border border-slate-700/40 p-3">
-      {loading ? (
+      {txLoading ? (
         <div className="flex h-64 items-center justify-center"><Loader2 className="h-8 w-8 animate-spin" /></div>
       ) : filtered.length === 0 ? (
-        <div className="flex h-48 items-center justify-center text-sm text-slate-500">No hay movimientos para esta vista.</div>
+        <div className="flex h-48 items-center justify-center px-4 text-center text-sm text-slate-500">No hay movimientos en {monthName} de {year}{query || kind !== 'all' ? ' para este filtro' : ''}.</div>
       ) : view === 'table' ? (
         <div className="custom-scrollbar overflow-x-auto rounded-2xl border border-slate-800/60">
           <table className="w-full min-w-[820px] border-collapse text-sm">
@@ -185,14 +312,21 @@ export function TransactionsPage() {
           </table>
         </div>
       ) : (
-        <div className="grid gap-3">{filtered.map((tx) => { const reversed = Boolean(tx.isReversed || tx.reversalOf); return <article key={tx.id} className="rounded-3xl border border-slate-700/40 bg-slate-900/35 p-4"><div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between"><div><p className="font-black text-slate-100">{tx.description}</p><p className="text-xs text-slate-500">{tx.accountName}</p><div className="mt-2 flex gap-2"><Badge>{label(tx)}</Badge>{isProtectedTransaction(tx) && <Badge><ShieldCheck className="h-3 w-3" />Protegido</Badge>}{reversed && <Badge>Reversado</Badge>}</div></div><div className="flex items-center gap-3"><p className={tx.type === 'income' ? 'font-black text-green-300' : 'font-black text-red-300'}>{tx.type === 'income' ? '+' : '-'}{formatCOP(tx.amount)}</p><button disabled={reversed} onClick={() => openEdit(tx)} className="rounded-xl p-2 text-slate-400 hover:text-blue-300 disabled:opacity-30"><Pencil className="h-4 w-4" /></button><button disabled={reversed || busy === tx.id} onClick={() => removeTx(tx)} className="rounded-xl p-2 text-slate-400 hover:text-red-300 disabled:opacity-30">{busy === tx.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button></div></div></article>; })}</div>
+        <div className="grid gap-3">{filtered.map((tx) => { const reversed = Boolean(tx.isReversed || tx.reversalOf); return <article key={tx.id} className="rounded-3xl border border-slate-700/40 bg-slate-900/35 p-4"><div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between"><div><p className="font-black text-slate-100">{tx.description}</p><p className="text-xs text-slate-500">{tx.accountName} · {tx.date.toLocaleDateString('es-CO')}</p><div className="mt-2 flex gap-2"><Badge>{label(tx)}</Badge>{isProtectedTransaction(tx) && <Badge><ShieldCheck className="h-3 w-3" />Protegido</Badge>}{reversed && <Badge>Reversado</Badge>}</div></div><div className="flex items-center gap-3"><p className={tx.type === 'income' ? 'font-black text-green-300' : 'font-black text-red-300'}>{tx.type === 'income' ? '+' : '-'}{formatCOP(tx.amount)}</p><button disabled={reversed} onClick={() => openEdit(tx)} className="rounded-xl p-2 text-slate-400 hover:text-blue-300 disabled:opacity-30"><Pencil className="h-4 w-4" /></button><button disabled={reversed || busy === tx.id} onClick={() => removeTx(tx)} className="rounded-xl p-2 text-slate-400 hover:text-red-300 disabled:opacity-30">{busy === tx.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button></div></div></article>; })}</div>
       )}
     </section>
-    {open && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-xl"><form onSubmit={save} className="premium-panel w-full max-w-2xl rounded-[2rem] border border-slate-700/50 p-5"><h2 className="text-2xl font-black text-slate-100">{editing ? 'Editar' : 'Nuevo'}</h2><div className="mt-5 grid gap-4 sm:grid-cols-2">{!isTransfer(editing) && <><Select label="Tipo" value={form.type} onChange={(v) => setForm({ ...form, type: v as TransactionType, category: v === 'income' ? 'Ingreso' : 'Otros' })} options={[['income','Ingreso'],['expense','Gasto']]} /><Select label="Cuenta" value={form.accountId} onChange={(v) => setForm({ ...form, accountId: v })} options={accounts.map((a) => [a.id, a.name])} /></>}<Field label="Valor" value={form.amount} onChange={(v) => setForm({ ...form, amount: v })} />{!isTransfer(editing) && <Select label="Categoria" value={form.category} onChange={(v) => setForm({ ...form, category: v })} options={CATEGORIES.map((c) => [c, c])} />}<Field label="Descripcion" value={form.description} onChange={(v) => setForm({ ...form, description: v })} /><Field label="Fecha" type="date" value={form.date} onChange={(v) => setForm({ ...form, date: v })} /><Field label="Hora" type="time" value={form.time} onChange={(v) => setForm({ ...form, time: v })} /></div><div className="mt-6 flex justify-end gap-3"><button type="button" className="soft-button rounded-2xl px-4 py-2 font-black" onClick={() => setOpen(false)}>Cancelar</button><button type="submit" className="premium-button rounded-2xl px-4 py-2 font-black">Guardar</button></div></form></div>}
+    {open && <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/70 p-4 backdrop-blur-xl sm:items-center"><form onSubmit={save} className="premium-panel my-auto flex max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col rounded-[2rem] border border-slate-700/50"><h2 className="shrink-0 px-5 pt-5 text-2xl font-black text-slate-100">{editing ? 'Editar' : 'Nuevo'}</h2><div className="custom-scrollbar mt-4 grid flex-1 grid-cols-1 gap-4 overflow-y-auto px-5 sm:grid-cols-2">{!isTransfer(editing) && <><Select label="Tipo" value={form.type} onChange={(v) => setForm({ ...form, type: v as TransactionType, category: v === 'income' ? 'Ingreso' : 'Otros' })} options={[['income','Ingreso'],['expense','Gasto']]} /><Select label="Cuenta" value={form.accountId} onChange={(v) => setForm({ ...form, accountId: v })} options={accountOptions.map((a) => [a.id, a.name])} /></>}<Field label="Valor" value={form.amount} onChange={(v) => setForm({ ...form, amount: v })} />{!isTransfer(editing) && <Select label="Categoria" value={form.category} onChange={(v) => setForm({ ...form, category: v })} options={CATEGORIES.map((c) => [c, c])} />}<Field label="Descripcion" value={form.description} onChange={(v) => setForm({ ...form, description: v })} /><Field label="Fecha" type="date" value={form.date} onChange={(v) => setForm({ ...form, date: v })} /><Field label="Hora" type="time" value={form.time} onChange={(v) => setForm({ ...form, time: v })} /></div><div className="mt-4 flex shrink-0 justify-end gap-3 border-t border-slate-700/40 px-5 py-4"><button type="button" className="soft-button rounded-2xl px-4 py-2 font-black" onClick={() => setOpen(false)}>Cancelar</button><button type="submit" className="premium-button rounded-2xl px-4 py-2 font-black">Guardar</button></div></form></div>}
   </div>;
 }
 
-function Metric({ t, v }: { t: string; v: number }) { return <div className="rounded-3xl border border-blue-400/20 bg-blue-400/10 p-4"><p className="text-[10px] font-black uppercase tracking-[0.16em] text-blue-300">{t}</p><p className="mt-1 text-lg font-black text-slate-100">{formatCOP(v)}</p></div>; }
+function Stat({ label, value, tone }: { label: string; value: string; tone: 'green' | 'red' | 'blue' }) {
+  const tones: Record<string, string> = {
+    green: 'border-green-400/20 bg-green-400/10 text-green-300',
+    red: 'border-red-400/20 bg-red-400/10 text-red-300',
+    blue: 'border-blue-400/20 bg-blue-400/10 text-blue-300',
+  };
+  return <div className={`rounded-3xl border p-4 ${tones[tone]}`}><p className="text-[10px] font-black uppercase tracking-[0.16em]">{label}</p><p className="mt-1 text-lg font-black text-slate-100">{value}</p></div>;
+}
 function Badge({ children }: { children: React.ReactNode }) { return <span className="inline-flex items-center gap-1 rounded-full border border-slate-600/30 bg-slate-800/50 px-3 py-1 text-[10px] font-bold text-slate-300">{children}</span>; }
 function Field({ label, value, onChange, type = 'text' }: { label: string; value: string; onChange: (v: string) => void; type?: string }) { return <label><span className="mb-1 block text-xs font-black text-slate-400">{label}</span><input className="lux-input w-full rounded-2xl px-4 py-3 text-sm outline-none" type={type} value={value} onChange={(e) => onChange(e.target.value)} /></label>; }
 function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: string[][] }) { return <label><span className="mb-1 block text-xs font-black text-slate-400">{label}</span><select className="lux-input w-full rounded-2xl px-4 py-3 text-sm outline-none" value={value} onChange={(e) => onChange(e.target.value)}>{options.map(([v,l]) => <option key={v} value={v}>{l}</option>)}</select></label>; }
