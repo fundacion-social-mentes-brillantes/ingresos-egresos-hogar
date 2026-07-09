@@ -76,6 +76,15 @@ export interface Account {
   lastReconciledBalance?: number | null;
   reconciliationDifference?: number | null;
   active: boolean;
+  /**
+   * Titularidad del dinero de la cuenta:
+   * - 'own' (propia): dinero del usuario. Cuenta en sus finanzas personales.
+   * - 'external' (ajena): dinero de terceros que el usuario solo custodia
+   *   (p. ej. "cuentas camionetas"). NO entra en saldo/ingresos/gastos/patrimonio
+   *   personales, pero se sigue registrando aparte.
+   * Ausente/undefined = 'own' por compatibilidad con cuentas ya creadas.
+   */
+  ownership?: 'own' | 'external';
   createdAt: Date;
   batchImportId?: string;
   migrationVersion?: number;

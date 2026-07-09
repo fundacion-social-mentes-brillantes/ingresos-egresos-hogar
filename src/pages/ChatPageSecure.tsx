@@ -7,7 +7,7 @@ import { addActionLog, addChatMessage, assignOrphanMessagesToThread, deleteConve
 import { correctAccountingTransaction, createAccountingTransaction, reverseAccountingTransaction, reverseTransfer } from '../lib/accountingOperations';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { createDebtWithMoneyMovement, registerDebtPaymentWithMoneyMovement } from '../lib/debtMoney';
-import { buildAccountingLedger, buildFinancialSummaryForPeriod, summarizeDebts, toMoney } from '../lib/accounting';
+import { buildAccountingLedger, buildFinancialSummaryForPeriod, isExternalAccount, personalTransactions, summarizeDebts, toMoney } from '../lib/accounting';
 import { buildMonthlyReport } from '../lib/reporting';
 import { classifyChatAccountingTarget } from '../lib/chatAccountingSafety';
 import { parseSafeChatAmount } from '../lib/safeMoney';
@@ -171,8 +171,8 @@ async function getLocalMonthlySummary(uid: string): Promise<FinancialSummary> {
   const now = new Date();
   const start = new Date(now.getFullYear(), now.getMonth(), 1);
   const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
-  const txs = await getTransactionsByRange(uid, start, end);
-  return buildFinancialSummaryForPeriod(txs, start, end, 'this_month');
+  const [txs, accounts] = await Promise.all([getTransactionsByRange(uid, start, end), getAccounts(uid).catch(() => [])]);
+  return buildFinancialSummaryForPeriod(personalTransactions(txs, accounts), start, end, 'this_month');
 }
 
 function monthLabel(date: Date): string {
@@ -193,16 +193,20 @@ async function buildFinancialContext(uid: string) {
   ]);
 
   const now = new Date();
-  const summary = buildFinancialSummaryForPeriod(allTx, startOfMonth(now), endOfMonth(now), 'this_month');
+  // Los totales personales (mes, tendencia, categorias, recientes) excluyen los
+  // movimientos de cuentas AJENAS: es dinero de terceros, no del usuario.
+  const personalTx = personalTransactions(allTx, accounts);
+  const summary = buildFinancialSummaryForPeriod(personalTx, startOfMonth(now), endOfMonth(now), 'this_month');
   const ledger = buildAccountingLedger(accounts, allTx, debts);
-  const report = buildMonthlyReport(allTx, debts);
+  const report = buildMonthlyReport(personalTx, debts);
   const debtSummary = summarizeDebts(debts);
 
   const accountLines = accounts.map((account) => {
     const stats = ledger.byAccount[account.id];
     const saldo = stats ? stats.saldoFisicoCalculado : toMoney(account.currentBalance || 0);
     const estado = !stats ? '' : stats.saldoRealConfirmado ? (stats.estado === 'cuadra' ? ' | cuadra' : ` | descuadre ${formatCOP(Math.abs(stats.diferenciaConciliacion))}`) : ' | sin conciliar';
-    return `- ${account.name}${account.active === false ? ' (inactiva)' : ''}: ${formatCOP(saldo)}${estado}`;
+    const ajena = isExternalAccount(account) ? ' | AJENA: dinero de terceros, NO es del usuario' : '';
+    return `- ${account.name}${account.active === false ? ' (inactiva)' : ''}: ${formatCOP(saldo)}${estado}${ajena}`;
   }).join('\n');
 
   const catLines = Object.entries(summary.byCategory)
@@ -214,7 +218,7 @@ async function buildFinancialContext(uid: string) {
   const trendLines = Array.from({ length: 6 }, (_, i) => 5 - i)
     .map((back) => {
       const ref = subMonths(now, back);
-      const periodo = buildFinancialSummaryForPeriod(allTx, startOfMonth(ref), endOfMonth(ref), 'custom');
+      const periodo = buildFinancialSummaryForPeriod(personalTx, startOfMonth(ref), endOfMonth(ref), 'custom');
       return `- ${monthLabel(ref)}: ingresos ${formatCOP(periodo.totalIncome)}, gastos ${formatCOP(periodo.totalExpenses)}, balance ${formatCOP(periodo.balance)}`;
     })
     .join('\n');
@@ -225,20 +229,25 @@ async function buildFinancialContext(uid: string) {
     .map((debt, index) => `${index + 1}. ${debt.direction === 'receivable' ? 'me deben' : 'yo debo'} ${formatCOP(debtRemaining(debt))} | ${debt.personName} | ${debt.description}`)
     .join('\n');
 
-  const recent = [...allTx]
+  const recent = [...personalTx]
     .sort((a, b) => b.date.getTime() - a.date.getTime())
     .slice(0, 50)
     .map((tx, index) => `${index + 1}. ${tx.date.toLocaleDateString('es-CO')} | ${tx.type === 'income' ? 'ingreso' : 'gasto'} ${formatCOP(toMoney(tx.amount))} | ${tx.category} | ${tx.description} | ${tx.accountName}`)
     .join('\n');
 
+  const ajenoLine = ledger.global.valorTotalAjeno
+    ? `DINERO AJENO CUSTODIADO: ${formatCOP(ledger.global.valorTotalAjeno)} en ${ledger.global.cuentasAjenas} cuenta(s) ajena(s). Esto NO es del usuario; NO lo sumes a su patrimonio ni lo cuentes como sus ingresos/gastos.`
+    : '';
+
   const context = [
-    `PATRIMONIO GLOBAL: neto ${formatCOP(ledger.global.patrimonioNeto)} (liquido ${formatCOP(ledger.global.valorTotalLiquido)} + te deben ${formatCOP(debtSummary.receivable)} - tu debes ${formatCOP(debtSummary.payable)}). Cuentas activas: ${ledger.global.cuentasActivas}.`,
+    `PATRIMONIO GLOBAL: neto ${formatCOP(ledger.global.patrimonioNeto)} (liquido ${formatCOP(ledger.global.valorTotalLiquido)} + te deben ${formatCOP(debtSummary.receivable)} - tu debes ${formatCOP(debtSummary.payable)}). Cuentas propias activas: ${ledger.global.cuentasActivas}.`,
+    ajenoLine,
     `CUENTAS (saldo y conciliacion):\n${accountLines || 'sin cuentas'}`,
     `MES ACTUAL (${monthLabel(now)}): ingresos ${formatCOP(summary.totalIncome)}, gastos ${formatCOP(summary.totalExpenses)}, balance ${formatCOP(summary.balance)}.`,
     `GASTOS DEL MES POR CATEGORIA:\n${catLines || 'sin gastos este mes'}`,
     `DEUDAS ABIERTAS (te deben ${formatCOP(debtSummary.receivable)} en total, tu debes ${formatCOP(debtSummary.payable)} en total):\n${debtList || 'sin deudas abiertas'}`,
-    `MOVIMIENTOS RECIENTES (ultimos 50 de ${allTx.length} en total):\n${recent || 'sin movimientos'}`,
-  ].join('\n\n');
+    `MOVIMIENTOS RECIENTES (ultimos 50 de ${personalTx.length} propios):\n${recent || 'sin movimientos'}`,
+  ].filter(Boolean).join('\n\n');
 
   const budgetLines = Object.entries(budgets)
     .map(([cat, limit]) => {

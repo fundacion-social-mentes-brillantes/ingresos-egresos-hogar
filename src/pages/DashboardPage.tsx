@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTransactions, useFinancialSummary, useLast7Days } from '../hooks/useTransactions';
 import { getTransactionsByRange } from '../lib/firestore';
+import { isExternalAccount, personalTransactions } from '../lib/accounting';
 import { StatCard } from '../components/ui/Card';
 import { formatCOP } from '../types';
 import type { Transaction } from '../types';
@@ -35,15 +36,18 @@ export function DashboardPage() {
       .then(setPeriodTx)
       .catch((error) => console.error('No pude cargar el periodo para el dashboard', error));
   }, [user]);
-  const summary = useFinancialSummary(periodTx);
-  const last7 = useLast7Days(periodTx);
+  // Excluye movimientos de cuentas ajenas (dinero de terceros) de los totales.
+  const personalPeriodTx = useMemo(() => personalTransactions(periodTx, accounts), [periodTx, accounts]);
+  const summary = useFinancialSummary(personalPeriodTx);
+  const last7 = useLast7Days(personalPeriodTx);
   const { debts, summary: debtSummary } = useDebts();
   const last7Total = last7.reduce((sum, tx) => sum + tx.amount, 0);
+  const personalRecent = useMemo(() => personalTransactions(transactions, accounts), [transactions, accounts]);
 
   const topCategory = Object.entries(summary.byCategory).sort((a, b) => b[1] - a[1])[0];
   const expenseBars = Object.entries(summary.byCategory).sort((a, b) => b[1] - a[1]).slice(0, 5);
   const openDebts = debts.filter((debt) => debt.status !== 'paid' && !debt.isReversed).slice(0, 4);
-  const accountPreview = accounts.filter((account) => account.active).slice(0, 4);
+  const accountPreview = accounts.filter((account) => account.active && !isExternalAccount(account)).slice(0, 4);
   const firstName = displayName.split(' ')[0] || 'Usuario';
   const today = format(new Date(), "EEEE d 'de' MMMM", { locale: es });
 
@@ -232,9 +236,9 @@ export function DashboardPage() {
             </div>
             <ArrowUpRight className="h-4 w-4 text-slate-500" />
           </div>
-          {transactions.length > 0 ? (
+          {personalRecent.length > 0 ? (
             <ul className="space-y-3">
-              {transactions.slice(0, 4).map((tx) => (
+              {personalRecent.slice(0, 4).map((tx) => (
                 <li key={tx.id} className="flex items-center justify-between gap-3 rounded-2xl border border-slate-700/40 bg-slate-900/35 p-3">
                   <div className="flex min-w-0 items-center gap-3">
                     <AccountBrandMark name={tx.accountName} size="sm" />

@@ -2,7 +2,8 @@ import { useRef, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useUserProfile } from '../hooks/useUserProfile';
 import { useTransactions } from '../hooks/useTransactions';
-import { addAccount, updateUserProfile } from '../lib/firestore';
+import { addAccount, updateAccount, updateUserProfile } from '../lib/firestore';
+import { isExternalAccount } from '../lib/accounting';
 import { CATEGORIES, ACCOUNT_LABELS, type AccountType, formatCOP } from '../types';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -61,7 +62,7 @@ export function SettingsPage() {
   const { accounts, refresh } = useTransactions();
   const [loading, setLoading] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
-  const [newAcc, setNewAcc] = useState({ name: '', type: 'cash' as AccountType, balance: 0 });
+  const [newAcc, setNewAcc] = useState({ name: '', type: 'cash' as AccountType, balance: 0, ownership: 'own' as 'own' | 'external' });
   const [photoSaving, setPhotoSaving] = useState(false);
   const [photoMessage, setPhotoMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -76,9 +77,23 @@ export function SettingsPage() {
         initialBalance: newAcc.balance,
         currentBalance: newAcc.balance,
         active: true,
+        ownership: newAcc.ownership,
       });
-      setNewAcc({ name: '', type: 'cash', balance: 0 });
+      setNewAcc({ name: '', type: 'cash', balance: 0, ownership: 'own' });
       setShowAdd(false);
+      await refresh();
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  // Cambia una cuenta ya creada entre propia y ajena (Valeria guarda dinero que
+  // no es de ella). El dinero ajeno deja de contar en sus finanzas personales.
+  const handleSetOwnership = async (accountId: string, ownership: 'own' | 'external') => {
+    if (!user) return;
+    setLoading(`own-${accountId}`);
+    try {
+      await updateAccount(user.uid, accountId, { ownership });
       await refresh();
     } finally {
       setLoading(null);
@@ -202,6 +217,18 @@ export function SettingsPage() {
               />
               <Input label="Saldo inicial" type="number" value={newAcc.balance} onChange={(event) => setNewAcc({ ...newAcc, balance: Number(event.target.value) })} />
             </div>
+            <div className="mt-4">
+              <Select
+                label="¿De quién es el dinero?"
+                options={[
+                  { value: 'own', label: 'Propia (es mío)' },
+                  { value: 'external', label: 'Ajena (guardo dinero de alguien más)' },
+                ]}
+                value={newAcc.ownership}
+                onChange={(event) => setNewAcc({ ...newAcc, ownership: event.target.value as 'own' | 'external' })}
+              />
+              {newAcc.ownership === 'external' && <p className="mt-2 text-xs text-amber-300/90">Esta cuenta guarda dinero de terceros: no contará en tu saldo, ingresos ni gastos personales.</p>}
+            </div>
             <div className="mt-4 flex justify-end gap-2">
               <Button size="sm" variant="ghost" onClick={() => setShowAdd(false)}>Cancelar</Button>
               <Button size="sm" loading={loading === 'add'} onClick={handleAddAccount}>Guardar cuenta</Button>
@@ -211,18 +238,32 @@ export function SettingsPage() {
 
         {accounts.length > 0 ? (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {accounts.map((account) => (
+            {accounts.map((account) => {
+              const ajena = isExternalAccount(account);
+              const busyOwn = loading === `own-${account.id}`;
+              return (
               <Card key={account.id} className="overflow-hidden p-5">
                 <div className="flex items-start justify-between gap-4">
                   <AccountBrandMark type={account.type} name={account.name} size="lg" showLabel />
-                  <span className="rounded-full border border-green-400/20 bg-green-400/10 px-3 py-1 text-xs font-black text-green-300">ACTIVA</span>
+                  {ajena
+                    ? <span className="rounded-full border border-amber-400/25 bg-amber-400/10 px-3 py-1 text-xs font-black text-amber-300">AJENA</span>
+                    : <span className="rounded-full border border-green-400/20 bg-green-400/10 px-3 py-1 text-xs font-black text-green-300">PROPIA</span>}
                 </div>
                 <div className="mt-5 rounded-3xl border border-slate-700/40 bg-slate-900/35 p-4">
                   <p className="text-xs font-black uppercase tracking-[0.16em] text-slate-500">{ACCOUNT_LABELS[account.type]}</p>
                   <p className="mt-1 text-2xl font-black text-blue-200">{formatCOP(account.currentBalance)}</p>
                 </div>
+                <div className="mt-4">
+                  <p className="mb-2 text-[11px] font-black uppercase tracking-[0.14em] text-slate-500">¿De quién es el dinero?</p>
+                  <div className="flex items-center gap-1 rounded-2xl border border-slate-700/40 bg-slate-900/50 p-1">
+                    <button type="button" disabled={busyOwn} onClick={() => handleSetOwnership(account.id, 'own')} className={`flex-1 rounded-xl px-3 py-2 text-xs font-black transition ${!ajena ? 'bg-green-500/20 text-green-200' : 'text-slate-400 hover:text-slate-200'}`}>Propia</button>
+                    <button type="button" disabled={busyOwn} onClick={() => handleSetOwnership(account.id, 'external')} className={`flex-1 rounded-xl px-3 py-2 text-xs font-black transition ${ajena ? 'bg-amber-500/20 text-amber-200' : 'text-slate-400 hover:text-slate-200'}`}>{busyOwn ? <Loader2 className="mx-auto h-4 w-4 animate-spin" /> : 'Ajena'}</button>
+                  </div>
+                  {ajena && <p className="mt-2 text-[11px] leading-relaxed text-amber-300/90">Dinero de terceros: no cuenta en tu saldo ni en tus ingresos/gastos personales.</p>}
+                </div>
               </Card>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <EmptyState asset="categories" title="No hay cuentas creadas" description="Crea cuentas como Efectivo, Nequi, Daviplata o Banco para ver sus marcas visuales." />

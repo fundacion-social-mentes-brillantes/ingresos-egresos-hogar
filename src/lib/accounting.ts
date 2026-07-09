@@ -66,6 +66,9 @@ export interface AccountingLedger {
     patrimonioNeto: number;
     deudasPorCobrarPendientes: number;
     deudasPorPagarPendientes: number;
+    /** Dinero de terceros custodiado en cuentas ajenas (no es del usuario). */
+    valorTotalAjeno: number;
+    cuentasAjenas: number;
   };
 }
 
@@ -197,6 +200,42 @@ function emptyAccountSummary(account: Account): AccountAccountingSummary {
   return { accountId: account.id, accountName: account.name, saldoInicial, saldoFisicoCalculado: saldoInicial, saldoRealIngresado: real.amount, saldoRealConfirmado: real.confirmed, diferenciaConciliacion: reconciliation.diferencia, ingresosFisicos: 0, ingresosReportables: 0, ingresosHistoricosNoReportables: 0, gastosFisicosTotales: 0, salidasFisicasTotales: 0, gastosReportablesOPresentes: 0, gastosHistoricosNoReportables: 0, transferenciasEntrantes: 0, transferenciasSalientes: 0, prestamosOtorgados: 0, prestamosCobrados: 0, prestamosRecibidos: 0, abonosADeudasPorCobrar: 0, abonosADeudasPorPagar: 0, gastosPendientesCreados: 0, gastosPendientesPagados: 0, pagosInteresOMora: 0, ajustesConciliacion: 0, movimientosProtegidos: 0, movimientosLegacy: 0, txCount: 0, estado: reconciliation.estado };
 }
 
+// ── Cuentas propias vs ajenas ───────────────────────────────────────────────
+// Una cuenta "ajena" (ownership === 'external') custodia dinero de terceros: no
+// entra en las finanzas personales del usuario. Ausente/undefined = propia.
+export function isExternalAccount(account?: Partial<Account> | null): boolean {
+  return account?.ownership === 'external';
+}
+
+// Indice de cuentas ajenas por id (y por nombre normalizado como respaldo legacy).
+export function buildExternalAccountIndex(accounts: Account[]): { ids: Set<string>; names: Set<string> } {
+  const ids = new Set<string>();
+  const names = new Set<string>();
+  for (const account of accounts) {
+    if (isExternalAccount(account)) { ids.add(account.id); names.add(normalizeText(account.name)); }
+  }
+  return { ids, names };
+}
+
+// Mismo criterio de atribucion que transactionBelongsToAccount: si el movimiento
+// tiene accountId, ESE manda; el nombre solo respalda datos legacy sin accountId.
+export function transactionIsExternal(tx: Transaction, index: { ids: Set<string>; names: Set<string> }): boolean {
+  if (tx.accountId) return index.ids.has(tx.accountId);
+  return index.names.has(normalizeText(tx.accountName));
+}
+
+// Deja SOLO los movimientos de cuentas propias (excluye los de cuentas ajenas).
+// Si no hay ninguna cuenta ajena devuelve el mismo arreglo (sin costo ni copia).
+export function personalTransactions(transactions: Transaction[], accounts: Account[]): Transaction[] {
+  const index = buildExternalAccountIndex(accounts);
+  if (!index.ids.size && !index.names.size) return transactions;
+  return transactions.filter((tx) => !transactionIsExternal(tx, index));
+}
+
+export function isOwnAccount(account?: Partial<Account> | null): boolean {
+  return !isExternalAccount(account);
+}
+
 export function transactionBelongsToAccount(tx: Transaction, account: Account): boolean {
   // Cuando el movimiento tiene accountId real, ese es el unico criterio valido:
   // emparejar por nombre podia atribuir (y duplicar) un movimiento a dos cuentas
@@ -254,16 +293,23 @@ function emptyGlobalBase(): Omit<AccountAccountingSummary, 'accountId' | 'accoun
 
 export function buildAccountingLedger(accounts: Account[], transactions: Transaction[], debts: Debt[] = []): AccountingLedger {
   const activeAccounts = accounts.filter((account) => account.active !== false);
+  // Cuentas PROPIAS (todas y solo las activas) vs AJENAS activas. Los totales
+  // globales personales suman solo lo propio; lo ajeno se reporta por separado.
+  const ownAll = accounts.filter((account) => isOwnAccount(account));
+  const ownActive = activeAccounts.filter((account) => isOwnAccount(account));
+  const externalActive = activeAccounts.filter((account) => isExternalAccount(account));
+  // byAccount conserva TODAS las cuentas (Cuentas/auditoria muestra tambien las
+  // ajenas), pero el resumen global se arma solo con las propias.
   const byAccount = Object.fromEntries(accounts.map((account) => [account.id, summarizeAccount(account, transactions)]));
-  const summaries = Object.values(byAccount);
   const debtSummary = summarizeDebts(debts);
-  const base = summaries.reduce((acc, item) => {
+  const base = ownAll.map((account) => byAccount[account.id]).reduce((acc, item) => {
     acc.saldoInicial += item.saldoInicial; acc.saldoFisicoCalculado += item.saldoFisicoCalculado; acc.saldoRealIngresado += item.saldoRealIngresado; acc.saldoRealConfirmado = acc.saldoRealConfirmado && item.saldoRealConfirmado; acc.ingresosFisicos += item.ingresosFisicos; acc.ingresosReportables += item.ingresosReportables; acc.ingresosHistoricosNoReportables += item.ingresosHistoricosNoReportables; acc.gastosFisicosTotales += item.gastosFisicosTotales; acc.salidasFisicasTotales += item.salidasFisicasTotales; acc.gastosReportablesOPresentes += item.gastosReportablesOPresentes; acc.gastosHistoricosNoReportables += item.gastosHistoricosNoReportables; acc.transferenciasEntrantes += item.transferenciasEntrantes; acc.transferenciasSalientes += item.transferenciasSalientes; acc.prestamosOtorgados += item.prestamosOtorgados; acc.prestamosCobrados += item.prestamosCobrados; acc.prestamosRecibidos += item.prestamosRecibidos; acc.abonosADeudasPorCobrar += item.abonosADeudasPorCobrar; acc.abonosADeudasPorPagar += item.abonosADeudasPorPagar; acc.gastosPendientesCreados += item.gastosPendientesCreados; acc.gastosPendientesPagados += item.gastosPendientesPagados; acc.pagosInteresOMora += item.pagosInteresOMora; acc.ajustesConciliacion += item.ajustesConciliacion; acc.movimientosProtegidos += item.movimientosProtegidos; acc.movimientosLegacy += item.movimientosLegacy; acc.txCount += item.txCount; return acc;
   }, emptyGlobalBase());
   const reconciliation = calculateReconciliation(base.saldoFisicoCalculado, base.saldoRealIngresado);
-  const valorTotalLiquido = activeAccounts.reduce((sum, account) => sum + toMoney(getAccountRealBalance(account).amount), 0);
+  const valorTotalLiquido = ownActive.reduce((sum, account) => sum + toMoney(getAccountRealBalance(account).amount), 0);
+  const valorTotalAjeno = externalActive.reduce((sum, account) => sum + toMoney(getAccountRealBalance(account).amount), 0);
   const patrimonioNeto = valorTotalLiquido + debtSummary.deudasPorCobrarPendientes - debtSummary.deudasPorPagarPendientes;
-  return { byAccount, global: { ...base, accountId: 'global', accountName: 'Global', diferenciaConciliacion: reconciliation.diferencia, estado: reconciliation.estado, cuentasActivas: activeAccounts.length, valorTotalLiquido, valorTotalConDeudasPendientes: patrimonioNeto, patrimonioNeto, deudasPorCobrarPendientes: debtSummary.deudasPorCobrarPendientes, deudasPorPagarPendientes: debtSummary.deudasPorPagarPendientes } };
+  return { byAccount, global: { ...base, accountId: 'global', accountName: 'Global', diferenciaConciliacion: reconciliation.diferencia, estado: reconciliation.estado, cuentasActivas: ownActive.length, valorTotalLiquido, valorTotalConDeudasPendientes: patrimonioNeto, patrimonioNeto, deudasPorCobrarPendientes: debtSummary.deudasPorCobrarPendientes, deudasPorPagarPendientes: debtSummary.deudasPorPagarPendientes, valorTotalAjeno, cuentasAjenas: externalActive.length } };
 }
 
 export function buildFinancialSummaryForPeriod(transactions: Transaction[], start: Date, end: Date, range: QueryRange = 'custom'): FinancialSummary {

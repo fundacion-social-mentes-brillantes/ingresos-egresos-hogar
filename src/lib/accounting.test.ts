@@ -6,8 +6,10 @@ import {
   calculateReconciliation,
   genericReversalBlockReason,
   inferMovementKind,
+  isExternalAccount,
   isReportableFinancialTransaction,
   parseCurrencyInput,
+  personalTransactions,
 } from './accounting';
 import { buildFinanceWorkbook, buildMonthlyReport } from './reporting';
 import { exportTransactionsToExcel } from './exportExcel';
@@ -321,5 +323,73 @@ describe('period reporting', () => {
 
   it('legacy Excel export is blocked without accounts so it cannot use old totals', async () => {
     await expect(exportTransactionsToExcel([tx()], 'x.xlsx')).rejects.toThrow(/legacy bloqueada/i);
+  });
+});
+
+describe('cuentas ajenas (dinero de terceros)', () => {
+  const propia = account({ id: 'mia', name: 'Banco', currentBalance: 300_000, initialBalance: 300_000 });
+  const ajena = account({ id: 'camionetas', name: 'Cuentas camionetas', type: 'other', ownership: 'external', currentBalance: 5_000_000, initialBalance: 5_000_000 });
+
+  it('isExternalAccount solo es true con ownership external (undefined = propia)', () => {
+    expect(isExternalAccount(ajena)).toBe(true);
+    expect(isExternalAccount(propia)).toBe(false);
+    expect(isExternalAccount(account({ ownership: 'own' }))).toBe(false);
+    expect(isExternalAccount(account())).toBe(false); // sin campo = propia
+  });
+
+  it('personalTransactions excluye movimientos de cuentas ajenas por accountId', () => {
+    const txs = [
+      tx({ id: 'mio', accountId: 'mia', accountName: 'Banco', amount: 10_000 }),
+      tx({ id: 'ajeno', accountId: 'camionetas', accountName: 'Cuentas camionetas', amount: 999_999 }),
+    ];
+    const personal = personalTransactions(txs, [propia, ajena]);
+    expect(personal.map((t) => t.id)).toEqual(['mio']);
+  });
+
+  it('personalTransactions excluye legacy (sin accountId) por nombre de cuenta ajena', () => {
+    const legacy = tx({ id: 'legacy-ajeno', accountName: 'Cuentas camionetas', amount: 7_000 });
+    delete (legacy as Partial<Transaction>).accountId;
+    const personal = personalTransactions([legacy], [propia, ajena]);
+    expect(personal).toHaveLength(0);
+  });
+
+  it('un movimiento con accountId propio NO se excluye aunque comparta nombre con una ajena', () => {
+    const homonima = account({ id: 'camionetas', name: 'Banco', ownership: 'external', currentBalance: 0, initialBalance: 0 });
+    const mio = tx({ id: 'mio', accountId: 'mia', accountName: 'Banco', amount: 10_000 });
+    const personal = personalTransactions([mio], [propia, homonima]);
+    expect(personal.map((t) => t.id)).toEqual(['mio']); // manda el accountId, no el nombre
+  });
+
+  it('sin cuentas ajenas devuelve el MISMO arreglo (sin costo)', () => {
+    const txs = [tx({ id: 'a' }), tx({ id: 'b' })];
+    expect(personalTransactions(txs, [propia])).toBe(txs);
+  });
+
+  it('el ledger separa liquido propio de dinero ajeno y no mezcla totales', () => {
+    const transactions = [
+      tx({ id: 'gasto-mio', type: 'expense', amount: 40_000, accountId: 'mia', accountName: 'Banco', date: new Date('2026-05-03') }),
+      tx({ id: 'gasto-ajeno', type: 'expense', amount: 1_000_000, accountId: 'camionetas', accountName: 'Cuentas camionetas', date: new Date('2026-05-04') }),
+    ];
+    const ledger = buildAccountingLedger([propia, ajena], transactions, []);
+    // Liquido personal = solo la cuenta propia; ajeno reportado aparte.
+    expect(ledger.global.valorTotalLiquido).toBe(300_000);
+    expect(ledger.global.valorTotalAjeno).toBe(5_000_000);
+    expect(ledger.global.cuentasActivas).toBe(1); // solo cuentas propias activas
+    expect(ledger.global.cuentasAjenas).toBe(1);
+    // El gasto de la cuenta ajena NO entra en los gastos globales personales.
+    expect(ledger.global.gastosReportablesOPresentes).toBe(40_000);
+    // byAccount conserva la cuenta ajena para su auditoria/conciliacion.
+    expect(ledger.byAccount.camionetas.salidasFisicasTotales).toBe(1_000_000);
+  });
+
+  it('el resumen del periodo sobre movimientos propios ignora el gasto ajeno', () => {
+    const start = new Date('2026-05-01T00:00:00');
+    const end = new Date('2026-05-31T23:59:59');
+    const transactions = [
+      tx({ id: 'gasto-mio', type: 'expense', amount: 40_000, accountId: 'mia', accountName: 'Banco', date: new Date('2026-05-03') }),
+      tx({ id: 'gasto-ajeno', type: 'expense', amount: 1_000_000, accountId: 'camionetas', accountName: 'Cuentas camionetas', date: new Date('2026-05-04') }),
+    ];
+    const summary = buildFinancialSummaryForPeriod(personalTransactions(transactions, [propia, ajena]), start, end, 'this_month');
+    expect(summary.totalExpenses).toBe(40_000);
   });
 });

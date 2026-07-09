@@ -7,7 +7,7 @@ import { useTransactions } from '../hooks/useTransactions';
 import { deleteTransaction, getAllTransactions } from '../lib/firestore';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { adjustAccountToRealBalance, correctAccountingTransaction, createAccountingTransaction, genericReversalBlockReason, reverseTransfer } from '../lib/accountingOperations';
-import { inferMovementKind, isProtectedTransaction, isReportableFinancialTransaction, parseCurrencyInput, toMoney } from '../lib/accounting';
+import { inferMovementKind, isExternalAccount, isProtectedTransaction, isReportableFinancialTransaction, parseCurrencyInput, personalTransactions, toMoney } from '../lib/accounting';
 import { asDate, formDateTimeFromDate, nowTimeStr, todayStr } from '../lib/dateForm';
 import { CATEGORIES, formatCOP } from '../types';
 import type { Account, Transaction, TransactionType } from '../types';
@@ -116,7 +116,11 @@ export function TransactionsPage() {
   useEffect(() => { loadAllTx().catch(() => setTxLoading(false)); }, [loadAllTx]);
 
   const activeAccounts = useMemo(() => accounts.filter((a) => a.active !== false), [accounts]);
-  const formAccounts = useMemo(() => pickFormAccounts(activeAccounts), [activeAccounts]);
+  // Solo cuentas PROPIAS entran en el dinero personal; las ajenas (dinero de
+  // terceros) se muestran aparte y no cuentan en saldo/ingresos/gastos.
+  const ownActiveAccounts = useMemo(() => activeAccounts.filter((a) => !isExternalAccount(a)), [activeAccounts]);
+  const externalActiveAccounts = useMemo(() => activeAccounts.filter((a) => isExternalAccount(a)), [activeAccounts]);
+  const formAccounts = useMemo(() => pickFormAccounts(ownActiveAccounts), [ownActiveAccounts]);
 
   // Al editar dejamos elegir cualquier cuenta e incluimos la cuenta original del
   // movimiento aunque este inactiva, para no cambiarla sin querer al guardar.
@@ -145,19 +149,20 @@ export function TransactionsPage() {
   // tipo efectivo) jamas puede quedar como Banco Y Efectivo a la vez, porque
   // duplicaria su saldo en pantalla y volveria negativo el resto de "Otras".
   const { efectivoAcc, bancoAcc } = useMemo(() => {
-    const bancoByName = activeAccounts.find((a) => norm(a.name) === 'banco') || null;
-    const efectivoByName = activeAccounts.find((a) => norm(a.name) === 'efectivo') || null;
-    const efectivo = efectivoByName || activeAccounts.find((a) => isCashName(a) && a.id !== bancoByName?.id) || null;
+    const bancoByName = ownActiveAccounts.find((a) => norm(a.name) === 'banco') || null;
+    const efectivoByName = ownActiveAccounts.find((a) => norm(a.name) === 'efectivo') || null;
+    const efectivo = efectivoByName || ownActiveAccounts.find((a) => isCashName(a) && a.id !== bancoByName?.id) || null;
     const banco = (bancoByName && bancoByName.id !== efectivo?.id ? bancoByName : null)
-      || activeAccounts.find((a) => isBankName(a) && a.id !== efectivo?.id) || null;
+      || ownActiveAccounts.find((a) => isBankName(a) && a.id !== efectivo?.id) || null;
     return { efectivoAcc: efectivo, bancoAcc: banco };
-  }, [activeAccounts]);
+  }, [ownActiveAccounts]);
   const saldo = useMemo(() => {
-    const total = activeAccounts.reduce((s, a) => s + toMoney(a.currentBalance), 0);
+    const total = ownActiveAccounts.reduce((s, a) => s + toMoney(a.currentBalance), 0);
+    const ajeno = externalActiveAccounts.reduce((s, a) => s + toMoney(a.currentBalance), 0);
     const efectivo = efectivoAcc ? toMoney(efectivoAcc.currentBalance) : 0;
     const banco = bancoAcc ? toMoney(bancoAcc.currentBalance) : 0;
-    return { total, efectivo, banco, otras: total - efectivo - banco };
-  }, [activeAccounts, efectivoAcc, bancoAcc]);
+    return { total, ajeno, efectivo, banco, otras: total - efectivo - banco };
+  }, [ownActiveAccounts, externalActiveAccounts, efectivoAcc, bancoAcc]);
 
   // Modal "Corregir saldo": la persona escribe cuanto tiene DE VERDAD y la app
   // crea un ajuste contable atomico para quedar igual a la vida real.
@@ -197,8 +202,10 @@ export function TransactionsPage() {
   const monthRange = useMemo(() => ({ start: startOfMonth(new Date(year, selectedMonth, 1)), end: endOfMonth(new Date(year, selectedMonth, 1)) }), [year, selectedMonth]);
   const yearRange = useMemo(() => ({ start: startOfYear(now), end: endOfYear(now) }), [now]);
 
-  const monthTx = useMemo(() => allTx.filter((tx) => tx.date >= monthRange.start && tx.date <= monthRange.end), [allTx, monthRange]);
-  const yearTx = useMemo(() => allTx.filter((tx) => tx.date >= yearRange.start && tx.date <= yearRange.end), [allTx, yearRange]);
+  // Solo movimientos de cuentas propias entran en los totales/lista personales.
+  const ownTx = useMemo(() => personalTransactions(allTx, accounts), [allTx, accounts]);
+  const monthTx = useMemo(() => ownTx.filter((tx) => tx.date >= monthRange.start && tx.date <= monthRange.end), [ownTx, monthRange]);
+  const yearTx = useMemo(() => ownTx.filter((tx) => tx.date >= yearRange.start && tx.date <= yearRange.end), [ownTx, yearRange]);
   const monthAgg = useMemo(() => aggregate(monthTx), [monthTx]);
   const yearAgg = useMemo(() => aggregate(yearTx), [yearTx]);
 
@@ -313,6 +320,7 @@ export function TransactionsPage() {
           </div>
         </div>
         {saldo.otras !== 0 && <p className="mt-3 rounded-2xl border border-slate-700/40 bg-slate-900/40 p-3 text-xs font-bold text-slate-400">Otras cuentas guardan {formatCOP(saldo.otras)} (cuentas antiguas del historial).</p>}
+        {saldo.ajeno !== 0 && <p className="mt-3 rounded-2xl border border-amber-400/25 bg-amber-500/10 p-3 text-xs font-bold text-amber-200">Guardas {formatCOP(saldo.ajeno)} de terceros (cuentas ajenas). No es tuyo, por eso no suma a tu saldo.</p>}
         <p className="mt-3 text-[10px] text-slate-500">¿No cuadra con lo que tienes en la mano? Toca "Corregir", escribe cuánto tienes de verdad y la app crea un ajuste para quedar igual a la vida real.</p>
       </section>
       <section className="lux-card p-5">

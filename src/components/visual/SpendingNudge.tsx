@@ -6,7 +6,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useTransactions } from '../../hooks/useTransactions';
 import { useDebts } from '../../hooks/useDebts';
 import { getBudgets } from '../../lib/firestore';
-import { isReportableFinancialTransaction, toMoney } from '../../lib/accounting';
+import { isReportableFinancialTransaction, personalTransactions, toMoney } from '../../lib/accounting';
 import { formatCOP } from '../../types';
 
 // Gastos "de gustos" (potencialmente innecesarios). Necesidades como Hogar,
@@ -30,7 +30,9 @@ export function SpendingNudge() {
   const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { transactions, loading } = useTransactions();
+  const { transactions: allTransactions, accounts, loading } = useTransactions();
+  // Los avisos son sobre el gasto PERSONAL: excluimos cuentas ajenas.
+  const transactions = useMemo(() => personalTransactions(allTransactions, accounts), [allTransactions, accounts]);
   const { debts } = useDebts();
   const [budgets, setBudgets] = useState<Record<string, number>>({});
   const [dismissed, setDismissed] = useState<Set<NudgeType>>(new Set());

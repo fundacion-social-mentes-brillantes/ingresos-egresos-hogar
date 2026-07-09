@@ -4,7 +4,7 @@ import { useTransactions } from '../hooks/useTransactions';
 import { getAllTransactions } from '../lib/firestore';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
 import { confirmRealBalance } from '../lib/accountingOperations';
-import { buildAccountingLedger, parseCurrencyInput, transactionBelongsToAccount } from '../lib/accounting';
+import { buildAccountingLedger, isExternalAccount, parseCurrencyInput, transactionBelongsToAccount } from '../lib/accounting';
 import { formatCOP } from '../types';
 import type { Transaction } from '../types';
 import { AccountBrandMark } from '../components/visual/AccountBrandMark';
@@ -126,7 +126,7 @@ export function AccountsPage() {
               const cuadra = reconciled && stats.estado === 'cuadra';
               return (
                 <button key={account.id} onClick={() => setSelectedAccountId(account.id)} className={clsx('w-full rounded-3xl border p-4 text-left transition', isSelected ? 'border-blue-400/40 bg-blue-500/10' : 'border-slate-700/40 bg-slate-900/35 hover:bg-slate-800/50')}>
-                  <div className="flex items-start justify-between gap-3"><AccountBrandMark type={account.type} name={account.name} size="md" showLabel />{!account.active && <span className="rounded-full bg-slate-800 px-2 py-1 text-[10px] font-black text-slate-400">INACTIVA</span>}</div>
+                  <div className="flex items-start justify-between gap-3"><AccountBrandMark type={account.type} name={account.name} size="md" showLabel /><div className="flex shrink-0 gap-1">{isExternalAccount(account) && <span className="rounded-full border border-amber-400/25 bg-amber-400/10 px-2 py-1 text-[10px] font-black text-amber-300">AJENA</span>}{!account.active && <span className="rounded-full bg-slate-800 px-2 py-1 text-[10px] font-black text-slate-400">INACTIVA</span>}</div></div>
                   <div className="mt-4 grid grid-cols-2 gap-2">
                     <div><p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Calculado</p><p className="font-black text-slate-100">{formatCOP(stats.saldoFisicoCalculado)}</p></div>
                     <div><p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Real</p><p className="font-black text-slate-100">{formatCOP(stats.saldoRealIngresado)}</p></div>

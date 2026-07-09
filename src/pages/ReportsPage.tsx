@@ -4,6 +4,7 @@ import { useTransactions } from '../hooks/useTransactions';
 import { useDebts } from '../hooks/useDebts';
 import { getAllTransactions, getBudgets, saveBudgets } from '../lib/firestore';
 import { buildMonthlyReport, buildMonthlyTrend, exportFinanceWorkbook } from '../lib/reporting';
+import { personalTransactions } from '../lib/accounting';
 import { CATEGORIES, formatCOP } from '../types';
 import type { Transaction } from '../types';
 import { EmptyState } from '../components/visual/EmptyState';
@@ -25,9 +26,12 @@ export function ReportsPage() {
     setTransactions(await getAllTransactions(user.uid));
   }, [user]);
   useEffect(() => { loadAllTransactions().catch((error) => console.error('No pude cargar el historial completo para el reporte', error)); }, [loadAllTransactions]);
-  const report = useMemo(() => buildMonthlyReport(transactions, debts), [transactions, debts]);
+  // El reporte personal excluye los movimientos de cuentas ajenas (dinero de
+  // terceros). El Excel sigue exportando el libro completo (todas las cuentas).
+  const personalTx = useMemo(() => personalTransactions(transactions, accounts), [transactions, accounts]);
+  const report = useMemo(() => buildMonthlyReport(personalTx, debts), [personalTx, debts]);
   const categories = Object.entries(report.byCategory).sort((a, b) => b[1] - a[1]).slice(0, 6);
-  const trend = useMemo(() => buildMonthlyTrend(transactions, 6), [transactions]);
+  const trend = useMemo(() => buildMonthlyTrend(personalTx, 6), [personalTx]);
 
   // Presupuestos por categoria (solo AVISO). draft = lo que se esta editando.
   const [budgets, setBudgets] = useState<Record<string, number>>({});
@@ -105,7 +109,7 @@ export function ReportsPage() {
           <LineChart className="h-5 w-5 text-blue-300" />
           Tendencia (últimos 6 meses)
         </h2>
-        {transactions.length ? (
+        {personalTx.length ? (
           <TrendChart points={trend} />
         ) : (
           <EmptyState asset="reports" title="Aún no hay historial para la tendencia" description="Registra o importa movimientos y aquí verás cómo evolucionan tus ingresos y gastos mes a mes." />
