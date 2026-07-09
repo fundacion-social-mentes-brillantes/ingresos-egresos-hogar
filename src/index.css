@@ -460,7 +460,22 @@ body.theme-light .lux-table tbody tr:hover {
   box-shadow: 0 0 18px currentColor;
 }
 
+/* Numero grande del "Saldo actual": rosado vivo con brillo, legible en los dos
+   temas (peticion textual: "un rosado mas vivo y que alumbre si se puede").
+   OJO: los temas reales en runtime son theme-man (oscuro) y theme-woman (claro);
+   theme-light se mantiene solo por si algun flujo legacy lo aplica. */
+.saldo-glow {
+  color: #f472b6;
+  text-shadow: 0 0 14px rgba(244, 114, 182, 0.55), 0 0 32px rgba(236, 72, 153, 0.3);
+}
+body.theme-light .saldo-glow,
+body.theme-woman .saldo-glow {
+  color: #db2777 !important;
+  text-shadow: 0 0 10px rgba(236, 72, 153, 0.35), 0 0 24px rgba(219, 39, 119, 0.18);
+}
+
 /* Light-mode rescue for existing Tailwind-heavy surfaces. */
+body.theme-light .text-slate-50,
 body.theme-light .text-slate-100,
 body.theme-light .text-slate-200 { color: var(--app-text) !important; }
 body.theme-light .text-slate-300 { color: #334155 !important; }
@@ -840,9 +855,31 @@ body.theme-woman .status-dot {
   color: var(--app-primary);
 }
 
+body.theme-woman .text-slate-50,
 body.theme-woman .text-slate-100,
 body.theme-woman .text-slate-200 {
   color: var(--app-heading) !important;
+}
+
+/* Texto rosa (botones Corregir, vista previa de ajustes) sobre las superficies
+   casi blancas del tema mujer: rosa fuerte, no pastel ilegible. */
+body.theme-woman [class*="text-pink-"] {
+  color: var(--app-primary-strong) !important;
+}
+
+/* Verdes, rojos y ambares pastel (pensados para fondo oscuro) sobre las
+   superficies blancas del tema mujer: versiones oscuras legibles. Mismos tonos
+   que ya usaba el caso especial del menu lateral (#be123c). */
+body.theme-woman [class*="text-green-"],
+body.theme-woman [class*="text-emerald-"] {
+  color: #047857 !important;
+}
+body.theme-woman [class*="text-red-"],
+body.theme-woman [class*="text-rose-"] {
+  color: #be123c !important;
+}
+body.theme-woman [class*="text-amber-"] {
+  color: #b45309 !important;
 }
 
 body.theme-woman .text-slate-300 {

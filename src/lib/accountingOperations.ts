@@ -91,6 +91,10 @@ export function genericReversalBlockReason(tx: Partial<Transaction>): string | n
   if (tx.transferId || kind === 'transfer_in' || kind === 'transfer_out') return 'Movimiento de transferencia protegido: usa reverseTransfer para reversar las dos patas completas.';
   if (tx.debtId || tx.debtMovementKind || ['loan_given', 'loan_received', 'loan_payment_received', 'debt_payment_made', 'payable_expense_created', 'payable_expense_paid', 'receivable_created'].includes(kind)) return 'Movimiento de deuda protegido: usa el flujo de Deudas para abonar, corregir o anular sin descuadrar.';
   if (tx.batchImportId || kind === 'historical_non_reportable') return 'Movimiento historico/importado protegido: no se reversa como gasto o ingreso normal.';
+  // Ajuste de saldo puro (sin reversalOf: los reversos ya retornaron arriba).
+  // Antes esto devolvia null y la pantalla ofrecia Editar/Borrar que luego
+  // fallaban en isProtectedTransaction tras confirmar: callejon sin salida.
+  if (kind === 'reconciliation_adjustment') return 'Ajuste de saldo protegido: si quedo mal, usa "Corregir" en Saldo actual otra vez con el valor correcto.';
   return null;
 }
 
@@ -128,6 +132,68 @@ export async function confirmRealBalance(uid: string, accountId: string, realBal
     });
   });
   return reconciliation;
+}
+
+// Deja el saldo de la cuenta en la app IGUAL al saldo real que la persona tiene
+// en la mano o en el banco. NO pisa el saldo con un valor absoluto: crea un
+// movimiento de ajuste (reconciliation_adjustment, fuera de reportes) y mueve el
+// saldo via increment() en UNA sola transaccion. El saldo actual se lee DENTRO de
+// la transaccion, asi un movimiento concurrente (otro dispositivo, doble clic)
+// no puede colarse entre la lectura y el ajuste y descuadrar.
+export async function adjustAccountToRealBalance(uid: string, accountId: string, realBalanceInput: unknown, note = 'Ajuste al saldo real') {
+  const realBalance = normalizeAmount(realBalanceInput);
+  const adjustRef = doc(txCol(uid));
+  const auditDoc = doc(auditCol(uid));
+  return await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(accRef(uid, accountId));
+    if (!snap.exists()) throw new Error('La cuenta no existe.');
+    const data = snap.data() as Record<string, any>;
+    const current = toMoney(data.currentBalance);
+    const delta = realBalance - current;
+    const accountUpdate: Record<string, unknown> = {
+      realBalance,
+      lastReconciledBalance: realBalance,
+      lastReconciledAt: serverTimestamp(),
+      reconciliationDifference: 0,
+      updatedAt: serverTimestamp(),
+    };
+    if (delta !== 0) {
+      transaction.set(adjustRef, {
+        type: (delta > 0 ? 'income' : 'expense') as TransactionType,
+        amount: Math.abs(delta),
+        currency: 'COP' as const,
+        category: 'Ajuste de saldo',
+        accountId,
+        accountName: data.name || '',
+        description: `${note}: ${data.name || 'cuenta'} quedo en $${realBalance.toLocaleString('es-CO')}`,
+        date: serverTimestamp(),
+        rawText: note,
+        source: 'manual' as const,
+        confidence: 1,
+        movementKind: 'reconciliation_adjustment' as const,
+        affectsCash: true,
+        affectsReport: false,
+        affectsDebt: false,
+        excludeFromReports: true,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      accountUpdate.currentBalance = increment(delta);
+      accountUpdate.calculatedBalance = increment(delta);
+    }
+    transaction.update(accRef(uid, accountId), accountUpdate);
+    transaction.set(auditDoc, {
+      action: 'adjust_account_to_real_balance',
+      accountId,
+      accountName: data.name || '',
+      previousBalance: current,
+      realBalance,
+      delta,
+      adjustmentTransactionId: delta !== 0 ? adjustRef.id : null,
+      createdAt: serverTimestamp(),
+    });
+    return { previousBalance: current, realBalance, delta, adjustmentId: delta !== 0 ? adjustRef.id : null };
+  });
 }
 
 export async function createAccountingTransaction(uid: string, input: {

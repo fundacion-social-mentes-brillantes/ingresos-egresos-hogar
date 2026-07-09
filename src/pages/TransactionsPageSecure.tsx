@@ -6,7 +6,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useTransactions } from '../hooks/useTransactions';
 import { deleteTransaction, getAllTransactions } from '../lib/firestore';
 import { transferBetweenAccountsSafe } from '../lib/transferOperations';
-import { correctAccountingTransaction, createAccountingTransaction, genericReversalBlockReason, reverseTransfer } from '../lib/accountingOperations';
+import { adjustAccountToRealBalance, correctAccountingTransaction, createAccountingTransaction, genericReversalBlockReason, reverseTransfer } from '../lib/accountingOperations';
 import { inferMovementKind, isProtectedTransaction, isReportableFinancialTransaction, parseCurrencyInput, toMoney } from '../lib/accounting';
 import { asDate, formDateTimeFromDate, nowTimeStr, todayStr } from '../lib/dateForm';
 import { CATEGORIES, formatCOP } from '../types';
@@ -137,17 +137,62 @@ export function TransactionsPage() {
     }
   }, [open, editing, form.accountId, formAccounts]);
 
-  // Saldo actual (dinero de verdad hoy): sumamos los saldos mantenidos por el
-  // motor contable. Efectivo = cuentas de efectivo; Banco = todo lo demas.
-  const saldo = useMemo(() => {
-    let total = 0, efectivo = 0;
-    for (const a of activeAccounts) {
-      const bal = toMoney(a.currentBalance);
-      total += bal;
-      if (isCashName(a)) efectivo += bal;
-    }
-    return { total, efectivo, banco: total - efectivo };
+  // Saldo actual (dinero de verdad hoy): saldos mantenidos por el motor contable.
+  // Banco y Efectivo se muestran por su cuenta real (para poder corregirlas una a
+  // una); si otras cuentas viejas aun guardan plata, se muestra "Otras cuentas"
+  // para que el total siempre cuadre a la vista.
+  // Exclusion mutua garantizada: una misma cuenta (p. ej. "Banco" creada con
+  // tipo efectivo) jamas puede quedar como Banco Y Efectivo a la vez, porque
+  // duplicaria su saldo en pantalla y volveria negativo el resto de "Otras".
+  const { efectivoAcc, bancoAcc } = useMemo(() => {
+    const bancoByName = activeAccounts.find((a) => norm(a.name) === 'banco') || null;
+    const efectivoByName = activeAccounts.find((a) => norm(a.name) === 'efectivo') || null;
+    const efectivo = efectivoByName || activeAccounts.find((a) => isCashName(a) && a.id !== bancoByName?.id) || null;
+    const banco = (bancoByName && bancoByName.id !== efectivo?.id ? bancoByName : null)
+      || activeAccounts.find((a) => isBankName(a) && a.id !== efectivo?.id) || null;
+    return { efectivoAcc: efectivo, bancoAcc: banco };
   }, [activeAccounts]);
+  const saldo = useMemo(() => {
+    const total = activeAccounts.reduce((s, a) => s + toMoney(a.currentBalance), 0);
+    const efectivo = efectivoAcc ? toMoney(efectivoAcc.currentBalance) : 0;
+    const banco = bancoAcc ? toMoney(bancoAcc.currentBalance) : 0;
+    return { total, efectivo, banco, otras: total - efectivo - banco };
+  }, [activeAccounts, efectivoAcc, bancoAcc]);
+
+  // Modal "Corregir saldo": la persona escribe cuanto tiene DE VERDAD y la app
+  // crea un ajuste contable atomico para quedar igual a la vida real.
+  const [adjusting, setAdjusting] = useState<Account | null>(null);
+  const [realInput, setRealInput] = useState('');
+  const [adjustBusy, setAdjustBusy] = useState(false);
+  const [adjustError, setAdjustError] = useState('');
+  // parseError se muestra DENTRO del modal: antes se tragaba la excepcion y el
+  // boton solo quedaba gris sin explicar que formato acepta (ej: "300.00").
+  const adjustParsed = useMemo(() => {
+    if (!adjusting || !realInput.trim()) return { real: null as number | null, delta: 0, parseError: '' };
+    try {
+      const real = parseCurrencyInput(realInput);
+      return { real, delta: real - toMoney(adjusting.currentBalance), parseError: '' };
+    } catch (err: any) { return { real: null, delta: 0, parseError: err?.message || 'Valor invalido' }; }
+  }, [adjusting, realInput]);
+
+  function openAdjust(acc: Account) { setAdjusting(acc); setRealInput(''); setAdjustError(''); setError(''); }
+
+  async function confirmAdjust(e: FormEvent) {
+    e.preventDefault();
+    if (!user || !adjusting || adjustBusy || adjustParsed.real === null) return;
+    setAdjustBusy(true);
+    setAdjustError('');
+    try {
+      await adjustAccountToRealBalance(user.uid, adjusting.id, adjustParsed.real);
+      setAdjusting(null);
+      await loadAllTx(); // el saldo de cuentas se refresca solo (listener en tiempo real)
+    } catch (err: any) {
+      // El modal se queda ABIERTO con el error visible: si se cerrara, un fallo
+      // (sin internet, regla rechazada) seria indistinguible de un exito.
+      setAdjustError(err?.message || 'No pude ajustar el saldo. Revisa tu conexion e intenta de nuevo.');
+    }
+    finally { setAdjustBusy(false); }
+  }
 
   const monthRange = useMemo(() => ({ start: startOfMonth(new Date(year, selectedMonth, 1)), end: endOfMonth(new Date(year, selectedMonth, 1)) }), [year, selectedMonth]);
   const yearRange = useMemo(() => ({ start: startOfYear(now), end: endOfYear(now) }), [now]);
@@ -252,13 +297,23 @@ export function TransactionsPage() {
 
     <div className="grid gap-4 lg:grid-cols-2">
       <section className="lux-card p-5">
-        <div className="flex items-center gap-2"><Wallet className="h-4 w-4 text-emerald-300" /><h2 className="text-sm font-black uppercase tracking-[0.14em] text-slate-300">Saldo actual</h2></div>
-        <p className="mt-3 text-3xl font-black text-slate-50">{formatCOP(saldo.total)}</p>
+        <div className="flex items-center gap-2"><Wallet className="h-4 w-4 text-pink-400" /><h2 className="text-sm font-black uppercase tracking-[0.14em] text-slate-300">Saldo actual</h2></div>
+        <p className="saldo-glow mt-3 text-3xl font-black">{formatCOP(saldo.total)}</p>
         <p className="text-xs text-slate-500">Dinero disponible en total ahora mismo</p>
         <div className="mt-4 grid grid-cols-2 gap-3">
-          <div className="rounded-2xl border border-slate-700/40 bg-slate-900/40 p-3"><p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">Banco</p><p className="mt-1 text-lg font-black text-slate-100">{formatCOP(saldo.banco)}</p></div>
-          <div className="rounded-2xl border border-slate-700/40 bg-slate-900/40 p-3"><p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">Efectivo</p><p className="mt-1 text-lg font-black text-slate-100">{formatCOP(saldo.efectivo)}</p></div>
+          <div className="rounded-2xl border border-slate-700/40 bg-slate-900/40 p-3">
+            <p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">Banco</p>
+            <p className="mt-1 text-lg font-black text-slate-100">{formatCOP(saldo.banco)}</p>
+            {bancoAcc && <button type="button" onClick={() => openAdjust(bancoAcc)} className="mt-2 inline-flex items-center gap-1 rounded-xl border border-pink-400/30 bg-pink-500/10 px-2.5 py-1 text-[10px] font-black text-pink-300 hover:bg-pink-500/20"><Pencil className="h-3 w-3" />Corregir</button>}
+          </div>
+          <div className="rounded-2xl border border-slate-700/40 bg-slate-900/40 p-3">
+            <p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">Efectivo</p>
+            <p className="mt-1 text-lg font-black text-slate-100">{formatCOP(saldo.efectivo)}</p>
+            {efectivoAcc && <button type="button" onClick={() => openAdjust(efectivoAcc)} className="mt-2 inline-flex items-center gap-1 rounded-xl border border-pink-400/30 bg-pink-500/10 px-2.5 py-1 text-[10px] font-black text-pink-300 hover:bg-pink-500/20"><Pencil className="h-3 w-3" />Corregir</button>}
+          </div>
         </div>
+        {saldo.otras !== 0 && <p className="mt-3 rounded-2xl border border-slate-700/40 bg-slate-900/40 p-3 text-xs font-bold text-slate-400">Otras cuentas guardan {formatCOP(saldo.otras)} (cuentas antiguas del historial).</p>}
+        <p className="mt-3 text-[10px] text-slate-500">¿No cuadra con lo que tienes en la mano? Toca "Corregir", escribe cuánto tienes de verdad y la app crea un ajuste para quedar igual a la vida real.</p>
       </section>
       <section className="lux-card p-5">
         <div className="flex items-center gap-2"><CalendarRange className="h-4 w-4 text-blue-300" /><h2 className="text-sm font-black uppercase tracking-[0.14em] text-slate-300">Histórico del año {year}</h2></div>
@@ -316,6 +371,23 @@ export function TransactionsPage() {
       )}
     </section>
     {open && <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/70 p-4 backdrop-blur-xl sm:items-center"><form onSubmit={save} className="premium-panel my-auto flex max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col rounded-[2rem] border border-slate-700/50"><h2 className="shrink-0 px-5 pt-5 text-2xl font-black text-slate-100">{editing ? 'Editar' : 'Nuevo'}</h2><div className="custom-scrollbar mt-4 grid flex-1 grid-cols-1 gap-4 overflow-y-auto px-5 sm:grid-cols-2">{!isTransfer(editing) && <><Select label="Tipo" value={form.type} onChange={(v) => setForm({ ...form, type: v as TransactionType, category: v === 'income' ? 'Ingreso' : 'Otros' })} options={[['income','Ingreso'],['expense','Gasto']]} /><Select label="Cuenta" value={form.accountId} onChange={(v) => setForm({ ...form, accountId: v })} options={accountOptions.map((a) => [a.id, a.name])} /></>}<Field label="Valor" value={form.amount} onChange={(v) => setForm({ ...form, amount: v })} />{!isTransfer(editing) && <Select label="Categoria" value={form.category} onChange={(v) => setForm({ ...form, category: v })} options={CATEGORIES.map((c) => [c, c])} />}<Field label="Descripcion" value={form.description} onChange={(v) => setForm({ ...form, description: v })} /><Field label="Fecha" type="date" value={form.date} onChange={(v) => setForm({ ...form, date: v })} /><Field label="Hora" type="time" value={form.time} onChange={(v) => setForm({ ...form, time: v })} /></div><div className="mt-4 flex shrink-0 justify-end gap-3 border-t border-slate-700/40 px-5 py-4"><button type="button" className="soft-button rounded-2xl px-4 py-2 font-black" onClick={() => setOpen(false)}>Cancelar</button><button type="submit" className="premium-button rounded-2xl px-4 py-2 font-black">Guardar</button></div></form></div>}
+    {adjusting && <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/70 p-4 backdrop-blur-xl sm:items-center">
+      <form onSubmit={confirmAdjust} className="premium-panel my-auto flex max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col overflow-y-auto rounded-[2rem] border border-slate-700/50 p-5">
+        <h2 className="text-xl font-black text-slate-100">Corregir saldo de {adjusting.name}</h2>
+        <p className="mt-1 text-xs text-slate-500">La app tiene {formatCOP(toMoney(adjusting.currentBalance))}. Escribe cuánto tienes DE VERDAD y creamos un ajuste (no toca tus ingresos ni gastos del mes).</p>
+        <label className="mt-4 block">
+          <span className="mb-1 block text-xs font-black text-slate-400">¿Cuánto tienes de verdad en {adjusting.name}?</span>
+          <input autoFocus inputMode="numeric" className="lux-input w-full rounded-2xl px-4 py-3 text-sm outline-none" value={realInput} onChange={(e) => setRealInput(e.target.value)} placeholder="Ej: 300.000" />
+        </label>
+        {adjustParsed.parseError && <p className="mt-3 rounded-2xl border border-amber-400/25 bg-amber-500/10 p-3 text-xs font-bold text-amber-200">{adjustParsed.parseError} Escribe solo el número, sin decimales. Ej: 300.000</p>}
+        {adjustParsed.real !== null && <p className="mt-3 rounded-2xl border border-pink-400/25 bg-pink-500/10 p-3 text-xs font-bold text-pink-200">Quedará en {formatCOP(adjustParsed.real)} · ajuste de {adjustParsed.delta >= 0 ? '+' : '−'}{formatCOP(Math.abs(adjustParsed.delta))}{adjustParsed.delta === 0 ? ' (ya cuadra, solo se confirma)' : ''}</p>}
+        {adjustError && <p className="mt-3 rounded-2xl border border-red-400/30 bg-red-500/10 p-3 text-xs font-bold text-red-200">{adjustError}</p>}
+        <div className="mt-5 flex justify-end gap-3">
+          <button type="button" className="soft-button rounded-2xl px-4 py-2 font-black" onClick={() => setAdjusting(null)} disabled={adjustBusy}>Cancelar</button>
+          <button type="submit" className="premium-button rounded-2xl px-4 py-2 font-black disabled:opacity-40" disabled={adjustBusy || adjustParsed.real === null}>{adjustBusy ? <Loader2 className="inline h-4 w-4 animate-spin" /> : 'Ajustar'}</button>
+        </div>
+      </form>
+    </div>}
   </div>;
 }
 

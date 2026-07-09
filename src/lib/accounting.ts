@@ -86,9 +86,16 @@ export function normalizeText(value: unknown): string {
     .trim();
 }
 
+// Tope de dinero aceptado por entrada de usuario: mil billones de COP. Muy por
+// encima de cualquier hogar real y muy por debajo de 2^53, donde los enteros de
+// JS pierden precision y un increment() dejaria de mover el saldo (descuadre
+// silencioso). Un typo con la tecla sostenida no puede volar la contabilidad.
+const MAX_MONEY = 1_000_000_000_000_000;
+
 function assertValidInteger(value: number, original: unknown): number {
   if (!Number.isFinite(value) || !Number.isInteger(value)) throw new Error(`Valor de dinero invalido: ${String(original)}`);
   if (value < 0) throw new Error('El dinero no puede ser negativo en este campo.');
+  if (value > MAX_MONEY) throw new Error(`Ese valor es demasiado grande para ser dinero real: ${String(original)}`);
   return value;
 }
 
