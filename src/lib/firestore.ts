@@ -150,6 +150,26 @@ export async function updateUserProfile(uid: string, data: Partial<Omit<UserProf
 }
 
 // -- Accounts ----------------------------------------------------------------
+// Crea las 4 cuentas por defecto SOLO si el usuario aun no tiene ninguna. Antes
+// esto lo hacia una Cloud Function (seedDefaultUserData); se movio al cliente para
+// no depender de Cloud Functions (asi el proyecto puede quedar en plan gratuito).
+// Es idempotente: si ya hay cuentas, no crea nada (no duplica).
+export async function ensureDefaultAccounts(uid: string): Promise<void> {
+  const existing = await getDocs(query(accCol(uid), limit(1)));
+  if (!existing.empty) return;
+  const defaults = [
+    { name: 'Efectivo', type: 'cash' },
+    { name: 'Nequi', type: 'nequi' },
+    { name: 'Daviplata', type: 'daviplata' },
+    { name: 'Banco', type: 'bank' },
+  ] as const;
+  const batch = writeBatch(db);
+  for (const acc of defaults) {
+    batch.set(doc(accCol(uid)), { name: acc.name, type: acc.type, initialBalance: 0, currentBalance: 0, calculatedBalance: 0, active: true, ownership: 'own', createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+  }
+  await batch.commit();
+}
+
 export async function getAccounts(uid: string): Promise<Account[]> {
   const snap = await getDocs(query(accCol(uid), orderBy('createdAt', 'asc')));
   return snap.docs.map((d) => ({ id: d.id, ...d.data(), currentBalance: toMoney(d.data().currentBalance), calculatedBalance: toMoney(d.data().calculatedBalance), realBalance: d.data().realBalance, initialBalance: toMoney(d.data().initialBalance), createdAt: toDate(d.data().createdAt) })) as Account[];

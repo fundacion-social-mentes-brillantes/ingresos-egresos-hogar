@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { auth, callSeedDefaultUserData } from '../lib/firebase';
-import { createUserProfile, getUserProfile } from '../lib/firestore';
+import { auth } from '../lib/firebase';
+import { createUserProfile, ensureDefaultAccounts, getUserProfile } from '../lib/firestore';
 import { ensureAccessRequest, isSuperAdminEmail, watchMyAccess, type AccessRecord } from '../lib/accessControl';
 import {
   GoogleAuthProvider,
@@ -61,8 +61,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         });
 
         try {
-          await firebaseUser.getIdToken(true);
-          await callSeedDefaultUserData({});
+          await ensureDefaultAccounts(firebaseUser.uid);
         } catch (e) {
           console.warn('Could not seed default data:', e);
         }
@@ -184,8 +183,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     try {
-      await cred.user.getIdToken(true);
-      await callSeedDefaultUserData({});
+      await ensureDefaultAccounts(cred.user.uid);
     } catch (e) {
       console.warn('Could not seed default data after sign up:', e);
     }
