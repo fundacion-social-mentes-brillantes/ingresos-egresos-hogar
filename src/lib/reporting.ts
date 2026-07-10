@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import type { Account, ActionLog, Debt, DeletedTransaction, Transaction } from '../types';
-import { affectsCash, buildAccountingLedger, buildFinancialSummaryForPeriod, inferMovementKind, isReportableFinancialTransaction, moneyEffect, summarizeDebts, toMoney } from './accounting';
+import { affectsCash, buildAccountingLedger, buildExternalAccountIndex, buildFinancialSummaryForPeriod, inferMovementKind, isExternalAccount, isReportableFinancialTransaction, moneyEffect, summarizeDebts, toMoney, transactionIsExternal } from './accounting';
 
 export interface MonthlyReport { totalIncome: number; totalExpenses: number; balance: number; savingsRate: number; topCategory?: [string, number]; byCategory: Record<string, number>; frequentCategories: string[]; alerts: string[]; opportunities: string[]; }
 export type WorkbookParams = { transactions: Transaction[]; debts: Debt[]; accounts: Account[]; deletedTransactions?: DeletedTransaction[]; actionLogs?: ActionLog[]; fileName?: string };
@@ -96,30 +96,37 @@ export function buildFinanceWorkbook(params: WorkbookParams): ExcelJS.Workbook {
   workbook.creator = 'Ingresos y Egresos Hogar';
   workbook.created = new Date();
 
+  const externalIndex = buildExternalAccountIndex(params.accounts);
+  const hayAjenas = externalIndex.ids.size > 0 || externalIndex.names.size > 0;
+
   const cover = workbook.addWorksheet('Portada');
-  cover.columns = [{ header: 'Indicador', key: 'indicator', width: 38 }, { header: 'Valor', key: 'value', width: 28 }, { header: 'Note', key: 'note', width: 72 }];
+  cover.columns = [{ header: 'Indicador', key: 'indicator', width: 40 }, { header: 'Valor', key: 'value', width: 28 }, { header: 'Note', key: 'note', width: 78 }];
   [
-    { indicator: 'Saldo calculado global', value: ledger.global.saldoFisicoCalculado, note: 'Fuente: buildAccountingLedger' },
-    { indicator: 'Saldo real global', value: ledger.global.saldoRealIngresado, note: ledger.global.saldoRealConfirmado ? 'Confirmado' : 'Pendiente' },
+    { indicator: 'Saldo calculado (solo cuentas propias)', value: ledger.global.saldoFisicoCalculado, note: 'No incluye cuentas ajenas (dinero de terceros)' },
+    { indicator: 'Saldo real (solo cuentas propias)', value: ledger.global.saldoRealIngresado, note: ledger.global.saldoRealConfirmado ? 'Confirmado' : 'Pendiente' },
     { indicator: 'Diferencia conciliacion', value: ledger.global.diferenciaConciliacion, note: ledger.global.estado },
-    { indicator: 'Ingresos reportables', value: ledger.global.ingresosReportables, note: 'No incluye transferencias ni deudas' },
-    { indicator: 'Gastos reportables', value: ledger.global.gastosReportablesOPresentes, note: 'No incluye transferencias, deudas ni historicos' },
+    { indicator: 'Ingresos reportables (propias)', value: ledger.global.ingresosReportables, note: 'No incluye transferencias, deudas ni cuentas ajenas' },
+    { indicator: 'Gastos reportables (propias)', value: ledger.global.gastosReportablesOPresentes, note: 'No incluye transferencias, deudas, historicos ni cuentas ajenas' },
     { indicator: 'Historicos/no reportables', value: ledger.global.gastosHistoricosNoReportables + ledger.global.ingresosHistoricosNoReportables, note: 'Separados de reportables' },
     { indicator: 'Te deben pendiente', value: debtSummary.receivable, note: 'Deudas abiertas por cobrar' },
     { indicator: 'Tu debes pendiente', value: debtSummary.payable, note: 'Deudas abiertas por pagar' },
-    { indicator: 'Patrimonio neto', value: ledger.global.patrimonioNeto, note: 'Liquido + te deben - tu debes' },
+    { indicator: 'Patrimonio neto (propio)', value: ledger.global.patrimonioNeto, note: 'Liquido propio + te deben - tu debes' },
+    // Linea de conciliacion: dinero de terceros custodiado en cuentas ajenas.
+    // Con esto la portada vuelve a cuadrar con las hojas de detalle (que listan
+    // todas las cuentas): propio + ajeno = total de las filas de Cuentas.
+    { indicator: 'Dinero ajeno custodiado (NO es tuyo)', value: ledger.global.valorTotalAjeno, note: `${ledger.global.cuentasAjenas} cuenta(s) ajena(s). Se listan en las hojas de detalle marcadas como "Ajena".` },
   ].forEach((r) => cover.addRow(r));
   style(cover, [2]);
 
   const accounts = workbook.addWorksheet('Cuentas');
-  accounts.columns = [{ header: 'Cuenta', key: 'account', width: 26 }, { header: 'Saldo inicial', key: 'initial', width: 16 }, { header: 'Saldo calculado', key: 'calculated', width: 18 }, { header: 'Saldo real', key: 'real', width: 16 }, { header: 'Confirmado', key: 'confirmed', width: 12 }, { header: 'Diferencia', key: 'difference', width: 16 }, { header: 'Estado', key: 'status', width: 14 }, { header: 'Ingresos reportables', key: 'income', width: 20 }, { header: 'Gastos reportables', key: 'expense', width: 20 }, { header: 'Historicos', key: 'historical', width: 16 }, { header: 'Transfer in', key: 'transferIn', width: 16 }, { header: 'Transfer out', key: 'transferOut', width: 16 }];
-  params.accounts.forEach((account) => { const item = ledger.byAccount[account.id]; accounts.addRow({ account: account.name, initial: item.saldoInicial, calculated: item.saldoFisicoCalculado, real: item.saldoRealIngresado, confirmed: item.saldoRealConfirmado ? 'Si' : 'No', difference: item.diferenciaConciliacion, status: item.saldoRealConfirmado ? item.estado : 'Pendiente', income: item.ingresosReportables, expense: item.gastosReportablesOPresentes, historical: item.gastosHistoricosNoReportables + item.ingresosHistoricosNoReportables, transferIn: item.transferenciasEntrantes, transferOut: item.transferenciasSalientes }); });
-  style(accounts, [2, 3, 4, 6, 8, 9, 10, 11, 12]);
+  accounts.columns = [{ header: 'Cuenta', key: 'account', width: 26 }, { header: 'Titular', key: 'ownership', width: 12 }, { header: 'Saldo inicial', key: 'initial', width: 16 }, { header: 'Saldo calculado', key: 'calculated', width: 18 }, { header: 'Saldo real', key: 'real', width: 16 }, { header: 'Confirmado', key: 'confirmed', width: 12 }, { header: 'Diferencia', key: 'difference', width: 16 }, { header: 'Estado', key: 'status', width: 14 }, { header: 'Ingresos reportables', key: 'income', width: 20 }, { header: 'Gastos reportables', key: 'expense', width: 20 }, { header: 'Historicos', key: 'historical', width: 16 }, { header: 'Transfer in', key: 'transferIn', width: 16 }, { header: 'Transfer out', key: 'transferOut', width: 16 }];
+  params.accounts.forEach((account) => { const item = ledger.byAccount[account.id]; accounts.addRow({ account: account.name, ownership: isExternalAccount(account) ? 'Ajena' : 'Propia', initial: item.saldoInicial, calculated: item.saldoFisicoCalculado, real: item.saldoRealIngresado, confirmed: item.saldoRealConfirmado ? 'Si' : 'No', difference: item.diferenciaConciliacion, status: item.saldoRealConfirmado ? item.estado : 'Pendiente', income: item.ingresosReportables, expense: item.gastosReportablesOPresentes, historical: item.gastosHistoricosNoReportables + item.ingresosHistoricosNoReportables, transferIn: item.transferenciasEntrantes, transferOut: item.transferenciasSalientes }); });
+  style(accounts, [3, 4, 5, 7, 9, 10, 11, 12, 13]);
 
   const txSheet = workbook.addWorksheet('Movimientos');
-  txSheet.columns = [{ header: 'ID', key: 'id', width: 28 }, { header: 'Fecha', key: 'date', width: 20 }, { header: 'Tipo', key: 'type', width: 12 }, { header: 'Naturaleza', key: 'kind', width: 24 }, { header: 'Descripcion', key: 'description', width: 42 }, { header: 'Categoria', key: 'category', width: 24 }, { header: 'Cuenta', key: 'account', width: 24 }, { header: 'Valor', key: 'amount', width: 16 }, { header: 'Efecto caja', key: 'effect', width: 16 }, { header: 'Reportable', key: 'reportable', width: 14 }, { header: 'Reversado', key: 'reversed', width: 12 }, { header: 'Reverso de', key: 'reversalOf', width: 28 }, { header: 'Transfer ID', key: 'transferId', width: 28 }, { header: 'Debt ID', key: 'debtId', width: 28 }];
-  params.transactions.forEach((tx) => txSheet.addRow({ id: tx.id, date: dt(tx.date), type: tx.type, kind: inferMovementKind(tx), description: tx.description, category: tx.category, account: tx.accountName, amount: m(tx.amount), effect: affectsCash(tx) ? moneyEffect(tx) : 0, reportable: isReportableFinancialTransaction(tx) ? 'Si' : 'No', reversed: tx.isReversed ? 'Si' : 'No', reversalOf: tx.reversalOf || '', transferId: tx.transferId || '', debtId: tx.debtId || '' }));
-  style(txSheet, [8, 9]);
+  txSheet.columns = [{ header: 'ID', key: 'id', width: 28 }, { header: 'Fecha', key: 'date', width: 20 }, { header: 'Tipo', key: 'type', width: 12 }, { header: 'Naturaleza', key: 'kind', width: 24 }, { header: 'Descripcion', key: 'description', width: 42 }, { header: 'Categoria', key: 'category', width: 24 }, { header: 'Cuenta', key: 'account', width: 24 }, { header: 'Titular', key: 'ownership', width: 12 }, { header: 'Valor', key: 'amount', width: 16 }, { header: 'Efecto caja', key: 'effect', width: 16 }, { header: 'Reportable', key: 'reportable', width: 14 }, { header: 'Reversado', key: 'reversed', width: 12 }, { header: 'Reverso de', key: 'reversalOf', width: 28 }, { header: 'Transfer ID', key: 'transferId', width: 28 }, { header: 'Debt ID', key: 'debtId', width: 28 }];
+  params.transactions.forEach((tx) => txSheet.addRow({ id: tx.id, date: dt(tx.date), type: tx.type, kind: inferMovementKind(tx), description: tx.description, category: tx.category, account: tx.accountName, ownership: hayAjenas && transactionIsExternal(tx, externalIndex) ? 'Ajena' : 'Propia', amount: m(tx.amount), effect: affectsCash(tx) ? moneyEffect(tx) : 0, reportable: isReportableFinancialTransaction(tx) ? 'Si' : 'No', reversed: tx.isReversed ? 'Si' : 'No', reversalOf: tx.reversalOf || '', transferId: tx.transferId || '', debtId: tx.debtId || '' }));
+  style(txSheet, [9, 10]);
 
   const debtSheet = workbook.addWorksheet('Deudas');
   debtSheet.columns = [{ header: 'ID', key: 'id', width: 28 }, { header: 'Tipo', key: 'direction', width: 16 }, { header: 'Persona', key: 'person', width: 24 }, { header: 'Valor', key: 'amount', width: 16 }, { header: 'Pagado', key: 'paid', width: 16 }, { header: 'Pendiente', key: 'remaining', width: 16 }, { header: 'Estado', key: 'status', width: 14 }, { header: 'Anulada', key: 'voided', width: 12 }, { header: 'Cuenta', key: 'account', width: 24 }];

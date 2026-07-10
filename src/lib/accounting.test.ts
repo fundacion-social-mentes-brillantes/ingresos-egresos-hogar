@@ -316,13 +316,41 @@ describe('period reporting', () => {
     ];
     const workbook = buildFinanceWorkbook({ accounts, transactions, debts: [] });
     const sheet = workbook.getWorksheet('Movimientos');
-    expect(sheet?.getRow(2).getCell(9).value).toBe(0);
-    expect(sheet?.getRow(3).getCell(9).value).toBe(0);
-    expect(sheet?.getRow(4).getCell(9).value).toBe(-10_000);
+    // "Efecto caja" es la col 10 (tras insertar la col 8 "Titular" propia/ajena).
+    expect(sheet?.getRow(2).getCell(10).value).toBe(0);
+    expect(sheet?.getRow(3).getCell(10).value).toBe(0);
+    expect(sheet?.getRow(4).getCell(10).value).toBe(-10_000);
   });
 
   it('legacy Excel export is blocked without accounts so it cannot use old totals', async () => {
     await expect(exportTransactionsToExcel([tx()], 'x.xlsx')).rejects.toThrow(/legacy bloqueada/i);
+  });
+
+  it('el Excel cuadra: portada declara el dinero ajeno y las hojas marcan Titular', () => {
+    const accounts = [
+      account({ id: 'mia', name: 'Banco', currentBalance: 300_000, initialBalance: 300_000 }),
+      account({ id: 'camionetas', name: 'Camionetas', type: 'other', ownership: 'external', currentBalance: 5_000_000, initialBalance: 5_000_000 }),
+    ];
+    const transactions = [
+      tx({ id: 'mio', type: 'expense', amount: 40_000, accountId: 'mia', accountName: 'Banco' }),
+      tx({ id: 'ajeno', type: 'expense', amount: 1_000_000, accountId: 'camionetas', accountName: 'Camionetas' }),
+    ];
+    const ledger = buildAccountingLedger(accounts, transactions, []);
+    const workbook = buildFinanceWorkbook({ accounts, transactions, debts: [] });
+    // La portada declara el dinero ajeno = valorTotalAjeno (fila de conciliacion).
+    const cover = workbook.getWorksheet('Portada');
+    const ajenoRow = cover?.getRow(11);
+    expect(String(ajenoRow?.getCell(1).value)).toMatch(/ajeno/i);
+    expect(ajenoRow?.getCell(2).value).toBe(ledger.global.valorTotalAjeno);
+    expect(ledger.global.valorTotalAjeno).toBe(5_000_000);
+    // La hoja Cuentas marca Titular (col 2) Propia/Ajena.
+    const cuentas = workbook.getWorksheet('Cuentas');
+    expect(cuentas?.getRow(2).getCell(2).value).toBe('Propia');
+    expect(cuentas?.getRow(3).getCell(2).value).toBe('Ajena');
+    // La hoja Movimientos marca Titular (col 8) por movimiento.
+    const movs = workbook.getWorksheet('Movimientos');
+    expect(movs?.getRow(2).getCell(8).value).toBe('Propia');
+    expect(movs?.getRow(3).getCell(8).value).toBe('Ajena');
   });
 });
 
